@@ -1,11 +1,11 @@
 # Agencia de Viajes - Sistema de Gestión (POO & DAO)
 
-Aplicación de consola para registrar y administrar paquetes turísticos. El proyecto organiza las responsabilidades siguiendo un enfoque MVC/DAO: los modelos representan el dominio, `main.py` gestiona el menú y la interacción con el usuario, y la capa DAO concentra el acceso a SQLite. La base de datos local se guarda en `agencia.db`.
+Demostración automática de paquetes turísticos y compras locales. El proyecto organiza las responsabilidades siguiendo un enfoque MVC/DAO: los modelos representan el dominio, `main.py` ejecuta ejemplos reproducibles sin solicitar entrada, y la capa DAO concentra el acceso a SQLite. La demostración usa una base temporal y no modifica `agencia.db`.
 
 ## Arquitectura
 
 - **Modelo:** `Paquete_Turistico` contiene los datos comunes y los modelos `Paquete_Nacional`, `Paquete_Internacional` y `Paquete_Crucero` especializan su comportamiento. El diagrama editable en Mermaid está en `model/diagrama_paquetes.mmd`; refleja los modelos y DAO actuales, incluido el factor fijo de cálculo usado por los paquetes internacional y crucero, y que la clase base es concreta.
-- **Vista y flujo de aplicación:** `main.py` presenta el menú de consola, valida entradas y coordina las operaciones.
+- **Vista y flujo de demostración:** `main.py` crea e imprime los tres subtipos, prueba la validación del pasaporte, crea una reserva con su pago y presenta dos excepciones de negocio controladas.
 - **API REST local:** `main_api.py` expone catálogo público, login JWT, consulta FX y rutas protegidas de reserva e inventario.
 - **Persistencia:** `Dao` comparte la conexión y el cursor; `PaqueteDao` implementa las operaciones de almacenamiento para paquetes.
 - **Base de datos:** `conectar.py` abre la base SQLite y activa `PRAGMA foreign_keys = ON` en la conexión.
@@ -20,7 +20,7 @@ Aplicación de consola para registrar y administrar paquetes turísticos. El pro
 - Validar invariantes de paquetes al construirlos: código y duración positivos,
   nombre no vacío, precio finito y positivo, impuesto portuario finito y no
   negativo, y pasaporte estrictamente booleano.
-- Validar entradas numéricas del menú y del formulario de registro.
+- Ejecutar `python main.py` de principio a fin sin interacción por teclado.
 - Usar consultas SQL parametrizadas para crear, editar y dar de baja registros.
 - Consultar la tasa USD/CLP con fallback a la última tasa persistida en SQLite.
 - Aplicar límites de solicitudes persistentes y configurables por identificador y ámbito.
