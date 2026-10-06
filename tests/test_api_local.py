@@ -4,6 +4,7 @@ import concurrent.futures  # Ejecuta compras paralelas para comprobar que no se 
 import sqlite3  # Comprueba persistencia de contraseñas y prepara paquetes de prueba.
 import tempfile  # Mantiene cada escenario aislado en una base SQLite descartable.
 import unittest  # Ejecuta aserciones de integración sin servicios externos.
+from datetime import date  # Configura cupos y reservas para una fecha de viaje concreta.
 from contextlib import closing  # Cierra conexiones de fixture en Windows al finalizar cada preparación.
 from pathlib import Path  # Construye rutas portables para la base temporal.
 
@@ -11,9 +12,13 @@ from fastapi.testclient import TestClient  # Envía solicitudes ASGI dentro del 
 
 from dao.paquete_dao import PaqueteDao  # Inserta paquetes usando el DAO real que usa la aplicación.
 from main_api import create_app  # Construye la API local con servicios configurables para las pruebas.
+from model.paquete_internacional import Paquete_Internacional  # Crea un paquete cuya tarifa usa la cotización FX.
 from model.paquete_nacional import Paquete_Nacional  # Crea un paquete con precio determinista para verificar el recibo.
 from services.auth_service import UserRole  # Aprovisiona usuarios locales con los roles soportados.
 from services.compra_service import InsufficientCapacityError  # Reconoce el rechazo esperado al agotarse el inventario.
+
+TRAVEL_DATE = date(2026, 12, 15)
+TRAVEL_DATE_JSON = TRAVEL_DATE.isoformat()
 
 
 class LocalApiIntegrationTests(unittest.TestCase):
@@ -56,7 +61,7 @@ class LocalApiIntegrationTests(unittest.TestCase):
         token = self._login("10000013-k", "cliente-seguro-local-2026")  # Usa formato compacto y k minúscula para una cuenta con puntuación.
         response = self.client.post(  # Llama una ruta protegida para verificar el JWT retornado por login.
             "/reservas",  # Reservar sin cupos configurados falla por negocio, no por autenticación.
-            json={"package_code": 101, "quantity": 1},  # Envía el contrato JSON de reserva.
+            json={"package_code": 101, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Envía el contrato JSON de reserva.
             headers={"Authorization": f"Bearer {token}"},  # Presenta el JWT emitido por el endpoint.
         )  # Ejecuta la solicitud usando la credencial recién obtenida.
         self.assertEqual(response.status_code, 409)  # El token fue aceptado y el conflicto corresponde al inventario aún no configurado.
@@ -108,7 +113,7 @@ class LocalApiIntegrationTests(unittest.TestCase):
         client_token = self._login("10.000.013-k", "cliente-seguro-local-2026")  # Comprueba además que k minúscula se normaliza.
         inventory_response = self.client.put(  # Configura tres cupos antes de aceptar reservas.
             "/admin/paquetes/101/inventario",  # Ruta administrativa protegida por rol.
-            json={"total_capacity": 3},  # Declara tres cupos vendibles para este paquete.
+            json={"total_capacity": 3, "travel_date": TRAVEL_DATE_JSON},  # Declara tres cupos vendibles para este paquete y fecha.
             headers={"Authorization": f"Bearer {admin_token}"},  # Presenta el JWT del administrador.
         )  # Guarda capacidad en la tabla local de inventario.
         self.assertEqual(inventory_response.status_code, 200)  # Un admin autenticado puede preparar el inventario.
@@ -116,7 +121,7 @@ class LocalApiIntegrationTests(unittest.TestCase):
 
         purchase = self.client.post(  # Consume dos cupos en una sola transacción.
             "/reservas",  # Ejecuta CompraService detrás de la ruta protegida.
-            json={"package_code": 101, "quantity": 2},  # Solicita dos plazas del paquete.
+            json={"package_code": 101, "quantity": 2, "travel_date": TRAVEL_DATE_JSON},  # Solicita dos plazas del paquete.
             headers={"Authorization": f"Bearer {client_token}"},  # La reserva queda asociada al RUT del cliente del token.
         )  # Persiste recibo y descuento de capacidad atómicamente.
         self.assertEqual(purchase.status_code, 201)  # Confirma una reserva recién creada.
@@ -126,7 +131,7 @@ class LocalApiIntegrationTests(unittest.TestCase):
 
         excess_purchase = self.client.post(  # Intenta reservar dos plazas cuando queda solo una.
             "/reservas",  # El inventario insuficiente debe ser rechazado por el servicio de compra.
-            json={"package_code": 101, "quantity": 2},  # Excede la capacidad remanente.
+            json={"package_code": 101, "quantity": 2, "travel_date": TRAVEL_DATE_JSON},  # Excede la capacidad remanente.
             headers={"Authorization": f"Bearer {client_token}"},  # Mantiene la autenticación válida para aislar la regla de inventario.
         )  # Ejecuta la segunda solicitud tras la compra confirmada.
         self.assertEqual(excess_purchase.status_code, 409)  # No permite sobreventa.
@@ -137,7 +142,7 @@ class LocalApiIntegrationTests(unittest.TestCase):
         client_token = self._login("10.000.013-K", "cliente-seguro-local-2026")  # Obtiene un JWT de rol cliente.
         response = self.client.put(  # Intenta llamar a la operación administrativa.
             "/admin/paquetes/101/inventario",  # La ruta requiere rol administrador.
-            json={"total_capacity": 10},  # Solicita capacidad para un paquete existente.
+            json={"total_capacity": 10, "travel_date": TRAVEL_DATE_JSON},  # Solicita capacidad para un paquete existente y fecha.
             headers={"Authorization": f"Bearer {client_token}"},  # Presenta una identidad válida pero de menor privilegio.
         )  # La dependencia de rol debe denegar la operación.
         self.assertEqual(response.status_code, 403)  # Distingue falta de permisos de falta de autenticación.
@@ -145,12 +150,12 @@ class LocalApiIntegrationTests(unittest.TestCase):
     def test_concurrent_purchases_cannot_oversell_last_capacity(self) -> None:
         """Varias compras simultáneas compiten por el último cupo sin duplicarlo."""
         compra_service = self.app.state.compra_service  # Obtiene la instancia real de CompraService usada por la aplicación.
-        compra_service.configure_capacity(101, 1)  # Deja un único cupo disponible antes de iniciar los hilos.
+        compra_service.configure_capacity(101, TRAVEL_DATE, 1)  # Deja un único cupo disponible antes de iniciar los hilos.
 
         def attempt_purchase(_: int) -> bool:
             """Retorna True solo para la solicitud que logra confirmar el último cupo."""
             try:  # Permite que las solicitudes perdedoras reporten el conflicto de inventario esperado.
-                compra_service.purchase("10.000.013-K", 101, 1)  # Todas las operaciones intentan comprar el mismo paquete y RUT válido.
+                compra_service.purchase("10.000.013-K", 101, 1, travel_date=TRAVEL_DATE)  # Todas las operaciones compiten por la misma fecha.
             except InsufficientCapacityError:  # Las solicitudes que llegan después del primer commit ya no encuentran cupos.
                 return False  # Expone resultado denegado para comparar las compras confirmadas.
             return True  # Solo una transacción debe consumir el cupo disponible.
@@ -165,6 +170,57 @@ class LocalApiIntegrationTests(unittest.TestCase):
         response = self.client.get("/tipo-cambio")  # Consulta la ruta pública de tasa de cambio.
         self.assertEqual(response.status_code, 200)  # El proveedor simulado devuelve una cotización válida.
         self.assertEqual(response.json(), {"base_currency": "USD", "target_currency": "CLP", "rate": 987.65})  # Verifica contrato y tasa devuelta.
+
+    def test_international_reservation_freezes_fx_rate_in_price_and_database(self) -> None:
+        """La reserva calcula y persiste la misma cotización USD/CLP obtenida por FxService."""
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            with connection:
+                PaqueteDao(connection).insertar_paquete(
+                    Paquete_Internacional(102, "Ruta internacional", 5, 100.0, True)
+                )
+        admin_headers = {"Authorization": f"Bearer {self._login('9.876.543-3', 'admin-seguro-local-2026')}"}
+        inventory = self.client.put(
+            "/admin/paquetes/102/inventario",
+            json={"total_capacity": 2, "travel_date": TRAVEL_DATE_JSON},
+            headers=admin_headers,
+        )
+        self.assertEqual(inventory.status_code, 200, inventory.text)
+        purchase = self.client.post(
+            "/reservas",
+            json={"package_code": 102, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},
+            headers={"Authorization": f"Bearer {self._login('10.000.013-K', 'cliente-seguro-local-2026')}"},
+        )
+        self.assertEqual(purchase.status_code, 201, purchase.text)
+        self.assertEqual(purchase.json()["exchange_rate_applied"], 987.65)
+        self.assertEqual(purchase.json()["unit_price"], 98765.0)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            persisted = connection.execute(
+                "SELECT exchange_rate_applied, unit_price, travel_date FROM reservas WHERE reservation_id = ?",
+                (purchase.json()["reservation_id"],),
+            ).fetchone()
+        self.assertEqual(persisted, (987.65, 98765.0, TRAVEL_DATE_JSON))
+
+    def test_capacity_is_independent_for_each_travel_date(self) -> None:
+        """Un descuento de una fecha no reduce la disponibilidad de otro día."""
+        other_date = date(2026, 12, 16)
+        admin_headers = {"Authorization": f"Bearer {self._login('9.876.543-3', 'admin-seguro-local-2026')}"}
+        for travel_date, capacity in ((TRAVEL_DATE, 1), (other_date, 2)):
+            response = self.client.put(
+                "/admin/paquetes/101/inventario",
+                json={"total_capacity": capacity, "travel_date": travel_date.isoformat()},
+                headers=admin_headers,
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+        purchase = self.client.post(
+            "/reservas",
+            json={"package_code": 101, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},
+            headers={"Authorization": f"Bearer {self._login('10.000.013-K', 'cliente-seguro-local-2026')}"},
+        )
+        self.assertEqual(purchase.status_code, 201, purchase.text)
+        first_date = self.client.get(f"/paquetes?travel_date={TRAVEL_DATE_JSON}").json()[0]
+        second_date = self.client.get(f"/paquetes?travel_date={other_date.isoformat()}").json()[0]
+        self.assertEqual(first_date["cupos_disponibles"], 0)
+        self.assertEqual(second_date["cupos_disponibles"], 2)
 
     def test_openapi_contains_requested_routes(self) -> None:
         """FastAPI publica los contratos de rutas y métodos configurados."""

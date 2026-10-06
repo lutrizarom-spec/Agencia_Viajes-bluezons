@@ -6,6 +6,7 @@ import os  # Lee configuración local del entorno sin almacenar secretos en el r
 import sqlite3  # Inicializa el esquema del catálogo en el archivo SQLite configurado.
 from contextlib import asynccontextmanager, closing  # Administra vida de app y cierra conexiones SQLite.
 from collections.abc import Callable  # Tipifica el proveedor FX inyectable sin acoplar la API a una implementación.
+from datetime import date  # Valida y transporta la fecha solicitada para el viaje.
 from pathlib import Path  # Resuelve rutas de base locales de manera independiente del directorio actual.
 from typing import Annotated, Literal  # Expresa dependencias, validaciones y estados admitidos del flujo de pago.
 
@@ -30,6 +31,7 @@ from services.compra_service import (  # Importa compra transaccional y errores 
     CapacityBelowReservedError,
     CompraService,
     DatabaseBusyError,
+    ExchangeRateUnavailableError,
     IdempotencyConflictError,
     InsufficientCapacityError,
     InventoryNotConfiguredError,
@@ -77,6 +79,7 @@ class PackageResponse(BaseModel):
     tipo: str  # Subtipo persistido: nacional, internacional, crucero o genérico.
     precio_por_persona: float  # Precio resultante de la regla de cálculo del modelo.
     cupos_disponibles: int | None  # None significa inventario aún no configurado por un administrador.
+    travel_date: date | None  # None indica que se informa disponibilidad agregada, no una fecha concreta.
 
 
 class PackageFields(BaseModel):
@@ -132,6 +135,7 @@ class ReservationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")  # Rechaza atributos que no formen parte del contrato de compra.
     package_code: int = Field(gt=0, le=SQLITE_INTEGER_MAX)  # Exige código positivo dentro del rango entero de SQLite.
     quantity: int = Field(gt=0, le=SQLITE_INTEGER_MAX)  # Exige cupos positivos que puedan persistirse como INTEGER.
+    travel_date: date  # La disponibilidad se consulta y descuenta para este día concreto.
 
 
 class ReservationResponse(BaseModel):
@@ -141,8 +145,12 @@ class ReservationResponse(BaseModel):
     rut: str  # RUT autenticado al que queda asociada la compra.
     package_code: int  # Código del paquete adquirido.
     quantity: int  # Cupos que se descontaron atómicamente.
+    travel_date: date  # Fecha para la que se reservó inventario.
     unit_price: float  # Precio por persona usado en el cálculo.
     total_price: float  # Total calculado a partir del precio unitario y cantidad.
+    exchange_rate_applied: float | None  # Cotización USD/CLP congelada en la reserva cuando aplica.
+    total_paid: float  # Suma de abonos confirmados.
+    balance_due: float  # Saldo pendiente de pago.
     created_at: str  # Instante de confirmación serializado en UTC.
     status: str  # Estado persistido, confirmado o cancelado.
     cancelled_at: str | None  # Fecha UTC de cancelación o None para reservas vigentes.
@@ -155,7 +163,15 @@ class PaymentTransitionRequest(BaseModel):
     """Resultado que el administrador asigna al pago simulado local."""
 
     model_config = ConfigDict(extra="forbid")  # Evita aceptar campos de pago o tarjeta que no se procesan.
+    payment_id: str | None = Field(default=None, min_length=1, max_length=64)  # Permite resolver un pago específico; None selecciona el pendiente actual.
     status: Literal["confirmed", "failed"]  # Solo se admite resolver un pago pendiente.
+
+
+class PaymentCreateRequest(BaseModel):
+    """Monto de un abono adicional al anticipo inicial."""
+
+    model_config = ConfigDict(extra="forbid")
+    amount: float = Field(gt=0, allow_inf_nan=False)
 
 
 class PaymentResponse(BaseModel):
@@ -174,6 +190,7 @@ class InventoryRequest(BaseModel):
     """Cuerpo JSON administrativo para configurar la capacidad de un paquete."""
 
     model_config = ConfigDict(extra="forbid")  # Evita ignorar silenciosamente datos administrativos adicionales.
+    travel_date: date  # La capacidad configurada queda asociada a una fecha de salida concreta.
     total_capacity: int = Field(ge=0, le=SQLITE_INTEGER_MAX)  # Permite cero cupos y limita el entero a la capacidad de SQLite.
 
 
@@ -181,6 +198,7 @@ class InventoryResponse(BaseModel):
     """Disponibilidad calculada después de actualizar los cupos totales."""
 
     package_code: int  # Código de paquete al que pertenece el inventario.
+    travel_date: date  # Fecha cuya disponibilidad se acaba de configurar.
     available_capacity: int  # Cupos todavía no reservados después de la operación.
 
 
@@ -259,10 +277,13 @@ def create_app(
 
     auth_service = AuthService(resolved_database, resolved_secret)  # Crea usuarios/JWT con el secreto requerido.
     rate_limiter = RateLimiter(resolved_database)  # Reutiliza la persistencia SQLite existente para limitar intentos.
-    compra_service = CompraService(resolved_database)  # Crea inventario y reservas enlazados al catálogo existente.
     if not callable(fx_provider):  # Comprueba la dependencia externa inyectada antes de pasarla al servicio.
         raise TypeError("fx_provider debe ser una función que retorne una tasa numérica.")  # Evita fallos tardíos al consultar FX.
     fx_service = FxService(resolved_database, fx_provider)  # Inyecta el proveedor sin hacer llamadas de red al inicializar.
+    compra_service = CompraService(
+        resolved_database,
+        exchange_rate_provider=fx_service.get_usd_clp_rate,
+    )  # Comparte la cotización cacheada al calcular y persistir reservas.
 
     async def payment_expiry_loop() -> None:
         """Revisa cada intervalo pagos pendientes y registra cualquier error fatal."""
@@ -335,21 +356,32 @@ def create_app(
         return TokenResponse(access_token=token, token_type="bearer", expires_in=1800, rut=identity.rut, role=identity.role)  # Devuelve JWT con su identidad y vigencia configurada.
 
     @app.get("/paquetes", response_model=list[PackageResponse], tags=["Catálogo"])  # Publica una consulta sin autenticación al catálogo local.
-    def list_packages() -> list[PackageResponse]:
-        """Lee el catálogo y calcula precios con los modelos turísticos existentes."""
+    def list_packages(travel_date: date | None = None) -> list[PackageResponse]:
+        """Lee catálogo; acepta travel_date como query opcional para consultar disponibilidad exacta."""
         with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre una lectura acotada de catálogo.
             rows = PaqueteDao(connection).obtener_paquetes()  # Reutiliza la consulta de paquetes implementada en el DAO.
         response: list[PackageResponse] = []  # Prepara una lista tipada para serialización JSON y OpenAPI.
+        exchange_rate: float | None = None
         for row in rows:  # Convierte cada fila SQLite en un modelo y una respuesta pública.
             package = _build_package(row)  # Aplica la regla polimórfica existente sin cambiar fórmulas.
+            try:
+                if isinstance(package, (Paquete_Internacional, Paquete_Crucero)):
+                    if exchange_rate is None:
+                        exchange_rate = fx_service.get_usd_clp_rate()
+                    price = package.calcular_precio(exchange_rate)
+                else:
+                    price = package.calcular_precio()
+            except FxServiceError as error:
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
             response.append(  # Añade los datos públicos, precio y cupos conocidos.
                 PackageResponse(
                     codigo=package.codigo,  # Conserva la clave existente del catálogo.
                     nombre=package.nombre,  # Expone el nombre descriptivo del viaje.
                     duracion=package.duracion,  # Informa la duración ya almacenada.
                     tipo=row[4],  # Mantiene la categoría original persistida.
-                    precio_por_persona=package.calcular_precio(),  # Reutiliza el precio del subtipo existente.
-                    cupos_disponibles=compra_service.get_available_capacity(package.codigo),  # None indica que aún no se configuró inventario.
+                    precio_por_persona=price,  # Usa FX para internacional/crucero y la regla local para los demás.
+                    cupos_disponibles=compra_service.get_available_capacity(package.codigo, travel_date),  # Filtra por la fecha solicitada cuando viene en query.
+                    travel_date=travel_date,
                 )  # Crea un modelo Pydantic validado antes de la respuesta.
             )  # Incorpora el paquete actual a la respuesta del catálogo.
         return response  # FastAPI serializa la colección como JSON.
@@ -445,12 +477,12 @@ def create_app(
         """Configura cupos locales para poder vender un paquete del catálogo."""
         _ = identity  # Declara explícitamente que la dependencia se usa solo para autorización.
         try:  # Traduce condiciones de catálogo/capacidad a respuestas HTTP explícitas.
-            available = compra_service.configure_capacity(package_code, payload.total_capacity)  # Persiste capacidad y conserva reservas existentes.
+            available = compra_service.configure_capacity(package_code, payload.travel_date, payload.total_capacity)  # Persiste capacidad para el día configurado.
         except PackageNotFoundError as error:  # Detecta que el paquete no existe.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error  # Informa que no se encontró el recurso.
         except CapacityBelowReservedError as error:  # Impide reducir capacidad por debajo de lo ya confirmado.
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error  # Informa conflicto con reservas existentes.
-        return InventoryResponse(package_code=package_code, available_capacity=available)  # Devuelve cupos disponibles tras la configuración.
+        return InventoryResponse(package_code=package_code, travel_date=payload.travel_date, available_capacity=available)  # Devuelve la fecha y disponibilidad resultante.
 
     @app.post("/reservas", response_model=ReservationResponse, status_code=status.HTTP_201_CREATED, tags=["Reservas"])  # Publica una compra que requiere JWT.
     def create_reservation(  # El endpoint solo puede llegar a ejecutarse si el token se validó.
@@ -468,6 +500,7 @@ def create_app(
                 payload.package_code,  # Pasa el paquete solicitado al servicio transaccional.
                 payload.quantity,  # Pasa la cantidad a descontar atómicamente.
                 idempotency_key,  # Permite recuperar el mismo recibo si el cliente reenvía la clave.
+                travel_date=payload.travel_date,  # Descuenta cupos únicamente para el día solicitado.
             )  # El servicio guarda clave/huella junto al recibo y al descuento de inventario.
         except PackageNotFoundError as error:  # Mapea código inexistente a recurso no encontrado.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error  # No devuelve recibo si el paquete no existe.
@@ -479,6 +512,8 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error), headers={"Retry-After": "1"}) from error  # Indica que el cliente puede reintentar con la misma clave.
         except PurchasePersistenceError as error:  # Evita exponer SQL o detalles internos al consumidor de la API.
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo persistir la reserva.") from error  # Informa fallo técnico sin ocultarlo como éxito.
+        except (ExchangeRateUnavailableError, FxServiceError) as error:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
         except ValueError as error:  # Mapea el precio inválido o datos de dominio rechazados.
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error  # Diferencia una solicitud semánticamente inválida de fallos técnicos.
         if purchase_result.replayed:  # Distingue la repetición de una reserva que acaba de crearse.
@@ -528,17 +563,65 @@ def create_app(
     def get_reservation_payment(  # El estado se obtiene de SQLite y no consulta una entidad financiera.
         reservation_id: Annotated[str, PathParameter(min_length=1, max_length=64)],  # Limita el identificador antes de consultar la base.
         identity: Annotated[UserIdentity, Depends(current_user)],  # Requiere JWT para evitar exponer pagos públicamente.
+        payment_id: str | None = None,
     ) -> PaymentResponse:
         """Consulta el pago propio; el administrador puede consultar el de cualquier reserva."""
         try:  # Convierte acceso denegado o ausencia del pago en una respuesta uniforme.
             payment = compra_service.get_payment(  # Comprueba propiedad dentro del servicio, junto con la consulta.
                 reservation_id,  # Identifica la reserva cuyo pago se desea consultar.
                 identity.rut,  # Usa el RUT canónico del token, nunca un RUT del cuerpo.
+                payment_id=payment_id,
                 is_admin=identity.role is UserRole.ADMINISTRADOR,  # Permite consulta global solo al administrador.
             )  # Devuelve el último estado local persistido.
         except ReservationNotFoundError as error:  # No diferencia entre reserva inexistente y ajena.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error  # Evita filtrar existencia de otras cuentas.
         return PaymentResponse(**payment.__dict__)  # Serializa los campos sin exponer datos financieros sensibles.
+
+    @app.get("/reservas/{reservation_id}/pagos", response_model=list[PaymentResponse], tags=["Pagos locales"])
+    def list_reservation_payments(
+        reservation_id: Annotated[str, PathParameter(min_length=1, max_length=64)],
+        identity: Annotated[UserIdentity, Depends(current_user)],
+    ) -> list[PaymentResponse]:
+        """Lista todos los intentos y abonos asociados a una reserva."""
+        try:
+            payments = compra_service.list_payments(
+                reservation_id,
+                identity.rut,
+                is_admin=identity.role is UserRole.ADMINISTRADOR,
+            )
+        except ReservationNotFoundError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+        return [PaymentResponse(**payment.__dict__) for payment in payments]
+
+    @app.post(
+        "/reservas/{reservation_id}/pagos",
+        response_model=PaymentResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["Pagos locales"],
+    )
+    def create_reservation_payment(
+        payload: PaymentCreateRequest,
+        reservation_id: Annotated[str, PathParameter(min_length=1, max_length=64)],
+        identity: Annotated[UserIdentity, Depends(current_user)],
+    ) -> PaymentResponse:
+        """Crea un abono parcial adicional dentro del saldo de la reserva."""
+        try:
+            payment = compra_service.create_payment(
+                reservation_id,
+                identity.rut,
+                payload.amount,
+                is_admin=identity.role is UserRole.ADMINISTRADOR,
+            )
+        except ReservationNotFoundError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+        except PaymentTransitionConflictError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+        except sqlite3.Error as error:
+            logger.exception("No se pudo crear un pago para la reserva %s.", reservation_id)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo persistir el pago.") from error
+        return PaymentResponse(**payment.__dict__)
 
     @app.post("/admin/reservas/{reservation_id}/pago", response_model=PaymentResponse, tags=["Pagos locales"])  # Simula una notificación de pago solo para administración local.
     def resolve_reservation_payment(  # El usuario cliente no puede declarar su propio pago confirmado.
@@ -549,7 +632,7 @@ def create_app(
         """Simula la respuesta terminal de un proveedor, sin ejecutar un cobro real."""
         _ = identity  # La dependencia autentica y autoriza; la identidad no modifica el monto.
         try:  # Traduce errores del ciclo de estados a respuestas HTTP explícitas.
-            payment = compra_service.transition_payment(reservation_id, payload.status)  # Confirma o falla el pago bajo una transacción local.
+            payment = compra_service.transition_payment(reservation_id, payload.status, payment_id=payload.payment_id)  # Confirma o falla el pago elegido bajo una transacción local.
         except ReservationNotFoundError as error:  # Informa que la reserva o el pago no existe.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error  # No realiza cambios ante un identificador desconocido.
         except PaymentTransitionConflictError as error:  # Rechaza cambios desde un pago ya resuelto.

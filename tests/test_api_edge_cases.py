@@ -6,7 +6,7 @@ import time  # Espera brevemente para verificar el worker periódico de FastAPI.
 import unittest  # Ejecuta pruebas de integración con aserciones estándar.
 import concurrent.futures  # Compite varias solicitudes idempotentes sobre la misma clave.
 from contextlib import closing  # Cierra conexiones para permitir eliminar la base en Windows.
-from datetime import datetime, timedelta, timezone  # Construye claims JWT vencidos de manera determinista.
+from datetime import date, datetime, timedelta, timezone  # Construye fecha de viaje y claims JWT de prueba.
 from pathlib import Path  # Construye rutas para la base temporal.
 from unittest.mock import patch  # Simula bloqueo SQLite y controla pausas de retry.
 
@@ -24,6 +24,9 @@ from services.compra_service import (  # Accede a la compra y a los errores tran
     PaymentTransitionConflictError,
     PurchasePersistenceError,
 )
+
+TRAVEL_DATE = date(2026, 12, 15)
+TRAVEL_DATE_JSON = TRAVEL_DATE.isoformat()
 
 
 class ApiEdgeCaseTests(unittest.TestCase):
@@ -87,7 +90,7 @@ class ApiEdgeCaseTests(unittest.TestCase):
         )  # Obtiene un JWT auténtico pero fuera de su período de validez.
         response = self.client.post(  # Intenta reservar con el token expirado.
             "/reservas",  # La dependencia Bearer debe comprobar exp antes de la lógica de compra.
-            json={"package_code": 202, "quantity": 1},  # Envía un cuerpo válido para no confundir validación con autenticación.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Envía un cuerpo válido para aislar la autenticación.
             headers={"Authorization": f"Bearer {expired_token}"},  # Presenta el token vencido.
         )  # Ejecuta la ruta protegida.
         self.assertEqual(response.status_code, 401)  # Rechaza la identidad sin tocar el inventario.
@@ -108,12 +111,12 @@ class ApiEdgeCaseTests(unittest.TestCase):
         """Un inventario configurado explícitamente en cero no permite comprar."""
         self.client.put(  # Configura el paquete existente con cero cupos.
             "/admin/paquetes/202/inventario",  # Usa ruta protegida de administración.
-            json={"total_capacity": 0},  # Cero expresa agotado intencionalmente, no inventario desconocido.
+            json={"total_capacity": 0, "travel_date": TRAVEL_DATE_JSON},  # Cero expresa agotado en esta fecha, no inventario desconocido.
             headers=self._admin_headers(),  # Autoriza la configuración con un JWT admin.
         )  # Persiste capacidad cero en package_inventory.
         response = self.client.post(  # Intenta reservar un cupo inexistente.
             "/reservas",  # Usa la ruta de compra protegida.
-            json={"package_code": 202, "quantity": 1},  # Pide más de los cero cupos disponibles.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Pide más de los cero cupos disponibles.
             headers=self._client_headers(),  # Aporta identidad autenticada de cliente.
         )  # Ejecuta la compra que debe detectar falta de capacidad.
         self.assertEqual(response.status_code, 409)  # Informa conflicto de inventario sin reservar parcialmente.
@@ -123,12 +126,12 @@ class ApiEdgeCaseTests(unittest.TestCase):
         """Repetir cliente, clave y cuerpo reproduce el recibo y consume cupos una vez."""
         self.client.put(  # Abre capacidad para completar la compra inicial.
             "/admin/paquetes/202/inventario",  # Configura inventario usando la API administrativa.
-            json={"total_capacity": 3},  # Provee cupos suficientes para detectar cualquier doble descuento.
+            json={"total_capacity": 3, "travel_date": TRAVEL_DATE_JSON},  # Provee cupos suficientes para detectar cualquier doble descuento.
             headers=self._admin_headers(),  # Permite solo al admin gestionar capacidad.
         )  # Persisten los tres cupos iniciales.
         authorization = self._client_headers()  # Usa la misma identidad para las dos solicitudes idempotentes.
         headers = {**authorization, "X-Idempotency-Key": "checkout-edge-key-001"}  # Adjunta una clave estable del cliente.
-        body = {"package_code": 202, "quantity": 2}  # Fija el cuerpo que se asociará con esa clave.
+        body = {"package_code": 202, "quantity": 2, "travel_date": TRAVEL_DATE_JSON}  # Fija el paquete, cantidad y fecha asociados con esa clave.
 
         first = self.client.post("/reservas", json=body, headers=headers)  # Crea y confirma la primera reserva.
         replay = self.client.post("/reservas", json=body, headers=headers)  # Simula reintento al perderse la primera respuesta.
@@ -148,12 +151,12 @@ class ApiEdgeCaseTests(unittest.TestCase):
         """El cliente ve solo sus reservas y cancelar libera cupos exactamente una vez."""
         self.client.put(  # Prepara inventario para una compra seguida de cancelación.
             "/admin/paquetes/202/inventario",  # Configura capacidad mediante la ruta administrativa.
-            json={"total_capacity": 3},  # Reserva dos cupos y deja uno libre inicialmente.
+            json={"total_capacity": 3, "travel_date": TRAVEL_DATE_JSON},  # Reserva dos cupos y deja uno libre inicialmente.
             headers=self._admin_headers(),  # Autoriza la configuración con rol administrador.
         )  # Persiste los tres cupos disponibles.
         purchase = self.client.post(  # Crea una reserva del cliente de prueba.
             "/reservas",  # Ejecuta la ruta protegida de compra.
-            json={"package_code": 202, "quantity": 2},  # Consume dos de los tres cupos.
+            json={"package_code": 202, "quantity": 2, "travel_date": TRAVEL_DATE_JSON},  # Consume dos de los tres cupos.
             headers=self._client_headers(),  # Asocia la compra al RUT del token.
         )  # Registra la reserva y obtiene su identificador.
         self.assertEqual(purchase.status_code, 201)  # Verifica que la compra inicial quedó confirmada.
@@ -186,7 +189,7 @@ class ApiEdgeCaseTests(unittest.TestCase):
         )  # Persiste la cuenta con un RUT válido distinto al titular inicial.
         self.client.put(  # Habilita inventario para que el segundo usuario pueda reservar.
             "/admin/paquetes/202/inventario",  # Reutiliza la operación administrativa de capacidad.
-            json={"total_capacity": 2},  # Deja capacidad suficiente para una reserva.
+            json={"total_capacity": 2, "travel_date": TRAVEL_DATE_JSON},  # Deja capacidad suficiente para una reserva.
             headers=self._admin_headers(),  # Autoriza al rol administrador.
         )  # La capacidad se guarda para ambos clientes.
         second_login = self.client.post(  # Obtiene un token del segundo cliente.
@@ -196,7 +199,7 @@ class ApiEdgeCaseTests(unittest.TestCase):
         second_headers = {"Authorization": f"Bearer {second_login.json()['access_token']}"}  # Construye credenciales del segundo cliente.
         purchase = self.client.post(  # Crea reserva en nombre del segundo cliente.
             "/reservas",  # La ruta toma el RUT desde el JWT.
-            json={"package_code": 202, "quantity": 1},  # Reserva un cupo para el paquete configurado.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Reserva un cupo para fecha y paquete configurados.
             headers=second_headers,  # Asocia el recibo al segundo cliente.
         )  # Obtiene el identificador cuya privacidad se probará.
         reservation_id = purchase.json()["reservation_id"]  # Conserva UUID válido de una reserva ajena.
@@ -217,13 +220,13 @@ class ApiEdgeCaseTests(unittest.TestCase):
         """La compra retiene cupos; solo el admin confirma pago y los retries no duplican efectos."""
         self.client.put(  # Prepara dos plazas antes de crear la reserva pendiente de pago.
             "/admin/paquetes/202/inventario",  # Usa la ruta normal de inventario.
-            json={"total_capacity": 2},  # Un cupo se retendrá y uno quedará disponible.
+            json={"total_capacity": 2, "travel_date": TRAVEL_DATE_JSON},  # Un cupo se retendrá y uno quedará disponible.
             headers=self._admin_headers(),  # Autoriza el cambio como administrador.
         )  # Persiste inventario previo a la solicitud del cliente.
         client_headers = self._client_headers()  # Conserva la identidad propietaria para consultar el pago.
         purchase = self.client.post(  # Crea reserva y pago local pendiente en una sola operación.
             "/reservas",  # Usa la API integrada, no una llamada directa al servicio.
-            json={"package_code": 202, "quantity": 1},  # Solicita un cupo.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Solicita un cupo para el día indicado.
             headers={**client_headers, "X-Idempotency-Key": "payment-confirm-key"},  # Asocia reserva y pago al RUT autenticado y permite comprobar replay.
         )  # Retiene capacidad antes de conocer el resultado simulado.
         reservation_id = purchase.json()["reservation_id"]  # Obtiene el identificador para consultar y resolver el pago.
@@ -258,7 +261,7 @@ class ApiEdgeCaseTests(unittest.TestCase):
         self.assertEqual(self.client.get("/paquetes").json()[0]["cupos_disponibles"], 1)  # Confirmar pago conserva la reserva de capacidad.
         purchase_replay = self.client.post(  # Reenvía la compra original después de que el estado de pago cambió.
             "/reservas",  # La búsqueda idempotente debe reflejar el estado actual del pago.
-            json={"package_code": 202, "quantity": 1},  # Conserva el cuerpo asociado a la clave.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Conserva el cuerpo asociado a la clave.
             headers={**client_headers, "X-Idempotency-Key": "payment-confirm-key"},  # Reutiliza clave y propietario originales.
         )  # No crea otro recibo ni otra reserva de capacidad.
         self.assertEqual(purchase_replay.status_code, 200)  # La repetición devuelve el recurso previo.
@@ -270,16 +273,98 @@ class ApiEdgeCaseTests(unittest.TestCase):
         )  # El servicio devuelve un conflicto sin liberar el cupo.
         self.assertEqual(conflict.status_code, 409)  # Protege la transición terminal ya confirmada.
 
+    def test_reservation_accepts_multiple_partial_payments_until_total_is_paid(self) -> None:
+        """Un anticipo confirmado admite nuevos abonos hasta completar el saldo."""
+        self.client.put(
+            "/admin/paquetes/202/inventario",
+            json={"total_capacity": 1, "travel_date": TRAVEL_DATE_JSON},
+            headers=self._admin_headers(),
+        )
+        client_headers = self._client_headers()
+        admin_headers = self._admin_headers()
+        purchase = self.client.post(
+            "/reservas",
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},
+            headers=client_headers,
+        )
+        self.assertEqual(purchase.status_code, 201, purchase.text)
+        receipt = purchase.json()
+        initial_payment = self.client.get(
+            f"/reservas/{receipt['reservation_id']}/pago",
+            headers=client_headers,
+        )
+        self.assertEqual(initial_payment.status_code, 200, initial_payment.text)
+        self.assertEqual(initial_payment.json()["amount"], receipt["total_price"] * 0.5)
+        self.assertEqual(receipt["total_paid"], 0.0)
+
+        initial_confirmation = self.client.post(
+            f"/admin/reservas/{receipt['reservation_id']}/pago",
+            json={"payment_id": receipt["payment_id"], "status": "confirmed"},
+            headers=admin_headers,
+        )
+        self.assertEqual(initial_confirmation.status_code, 200, initial_confirmation.text)
+
+        failed_attempt = self.client.post(
+            f"/reservas/{receipt['reservation_id']}/pagos",
+            json={"amount": 1000.0},
+            headers=client_headers,
+        )
+        self.assertEqual(failed_attempt.status_code, 201, failed_attempt.text)
+        failed_result = self.client.post(
+            f"/admin/reservas/{receipt['reservation_id']}/pago",
+            json={"payment_id": failed_attempt.json()["payment_id"], "status": "failed"},
+            headers=admin_headers,
+        )
+        self.assertEqual(failed_result.status_code, 200, failed_result.text)
+        self.assertEqual(
+            self.client.get(f"/paquetes?travel_date={TRAVEL_DATE_JSON}").json()[0]["cupos_disponibles"],
+            0,
+        )
+
+        for amount in (10000.0, 5000.0, 5000.0):
+            payment = self.client.post(
+                f"/reservas/{receipt['reservation_id']}/pagos",
+                json={"amount": amount},
+                headers=client_headers,
+            )
+            self.assertEqual(payment.status_code, 201, payment.text)
+            confirmation = self.client.post(
+                f"/admin/reservas/{receipt['reservation_id']}/pago",
+                json={"payment_id": payment.json()["payment_id"], "status": "confirmed"},
+                headers=admin_headers,
+            )
+            self.assertEqual(confirmation.status_code, 200, confirmation.text)
+
+        payments = self.client.get(
+            f"/reservas/{receipt['reservation_id']}/pagos",
+            headers=client_headers,
+        )
+        self.assertEqual(payments.status_code, 200, payments.text)
+        self.assertEqual(len(payments.json()), 5)
+        confirmed_total = sum(
+            payment["amount"] for payment in payments.json()
+            if payment["status"] == "confirmed"
+        )
+        self.assertEqual(confirmed_total, receipt["total_price"])
+        reservations = self.client.get("/reservas", headers=client_headers)
+        self.assertEqual(reservations.status_code, 200, reservations.text)
+        details = next(
+            item for item in reservations.json()
+            if item["reservation_id"] == receipt["reservation_id"]
+        )
+        self.assertEqual(details["total_paid"], receipt["total_price"])
+        self.assertEqual(details["balance_due"], 0.0)
+
     def test_failed_payment_cancels_reservation_and_releases_capacity_once(self) -> None:
         """Un pago fallido cancela la reserva y libera los cupos de forma atómica e idempotente."""
         self.client.put(  # Configura una plaza que quedará retenida temporalmente.
             "/admin/paquetes/202/inventario",  # Prepara inventario para el flujo de pago.
-            json={"total_capacity": 1},  # La capacidad debe volver a estar libre tras el fallo.
+            json={"total_capacity": 1, "travel_date": TRAVEL_DATE_JSON},  # La capacidad debe volver a estar libre tras el fallo.
             headers=self._admin_headers(),  # Autoriza configuración con rol administrador.
         )  # El inventario queda listo.
         purchase = self.client.post(  # Genera pago pendiente asociado a la plaza.
             "/reservas",  # Ejecuta la compra local protegida.
-            json={"package_code": 202, "quantity": 1},  # Retiene la única plaza.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Retiene la única plaza de esa fecha.
             headers={**self._client_headers(), "X-Idempotency-Key": "payment-failure-key"},  # Usa cuenta cliente y conserva clave de operación.
         )  # Crea el recibo de reserva y pago.
         reservation_id = purchase.json()["reservation_id"]  # Conserva el identificador para resolver el pago.
@@ -304,7 +389,7 @@ class ApiEdgeCaseTests(unittest.TestCase):
         self.assertEqual(self.client.get("/paquetes").json()[0]["cupos_disponibles"], 1)  # La plaza fue liberada exactamente una vez.
         failed_replay = self.client.post(  # Reintenta la compra original después del fallo terminal del pago.
             "/reservas",  # Reproduce el resultado sin volver a retener inventario.
-            json={"package_code": 202, "quantity": 1},  # Usa los mismos datos ligados a la clave.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Usa los mismos datos ligados a la clave.
             headers={**self._client_headers(), "X-Idempotency-Key": "payment-failure-key"},  # Mantiene el mismo RUT y clave idempotente.
         )  # El recibo ya existente debe seguir reportando el pago fallido.
         self.assertEqual(failed_replay.status_code, 200)  # Recupera la reserva anterior en vez de crear otra.
@@ -323,18 +408,18 @@ class ApiEdgeCaseTests(unittest.TestCase):
         """El barrido vence pagos atrasados, preserva los confirmados y no libera dos veces."""
         self.client.put(  # Configura dos plazas para comparar pago pendiente y confirmado.
             "/admin/paquetes/202/inventario",  # Usa la API administrativa real.
-            json={"total_capacity": 2},  # Una plaza quedará confirmada y otra vencerá.
+            json={"total_capacity": 2, "travel_date": TRAVEL_DATE_JSON},  # Una plaza quedará confirmada y otra vencerá.
             headers=self._admin_headers(),  # Autoriza la configuración.
         )  # Persiste inventario.
         client_headers = self._client_headers()  # Conserva las credenciales del mismo cliente.
         confirmed_purchase = self.client.post(  # Crea el pago que después se confirmará.
             "/reservas",  # Hace una compra mediante el endpoint normal.
-            json={"package_code": 202, "quantity": 1},  # Retiene una plaza.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Retiene una plaza para la fecha.
             headers=client_headers,  # Asocia la compra al titular.
         )  # Devuelve el identificador de reserva y pago.
         pending_purchase = self.client.post(  # Crea otra reserva que quedará pendiente.
             "/reservas",  # Cada solicitud sin clave representa una compra distinta.
-            json={"package_code": 202, "quantity": 1},  # Retiene la segunda plaza.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Retiene la segunda plaza para la misma fecha.
             headers=client_headers,  # Usa la misma cuenta, con nuevo intento.
         )  # Deja el inventario completamente retenido.
         confirmed_id = confirmed_purchase.json()["reservation_id"]  # Guarda la reserva que no debe vencerse.
@@ -375,17 +460,17 @@ class ApiEdgeCaseTests(unittest.TestCase):
         """Lifespan barre expirados al iniciar y continúa haciéndolo periódicamente."""
         self.client.put(  # Prepara una plaza que quedará retenida por pago pendiente.
             "/admin/paquetes/202/inventario",  # Configura inventario por la ruta administrativa existente.
-            json={"total_capacity": 2},  # Se usarán plazas independientes para startup y barrido periódico.
+            json={"total_capacity": 2, "travel_date": TRAVEL_DATE_JSON},  # Se usarán plazas independientes para startup y barrido periódico.
             headers=self._admin_headers(),  # Autoriza el administrador.
         )  # Deja la capacidad disponible.
         startup_purchase = self.client.post(  # Crea un pago que se marcará vencido antes de iniciar la nueva app.
             "/reservas",  # Usa la transacción local ya cubierta por los otros casos.
-            json={"package_code": 202, "quantity": 1},  # Retiene una plaza.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Retiene una plaza para la fecha.
             headers=self._client_headers(),  # Asocia el pago a la cuenta del fixture.
         )  # Guarda reserva y fecha normal de expiración.
         periodic_purchase = self.client.post(  # Deja otro pago pendiente para vencer después de startup.
             "/reservas",  # Crea una reserva separada con su propio pago.
-            json={"package_code": 202, "quantity": 1},  # Retiene la segunda plaza.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Retiene la segunda plaza para la misma fecha.
             headers=self._client_headers(),  # Usa el mismo titular, con solicitud independiente.
         )  # Permite probar el worker tras su barrido inicial.
         startup_reservation_id = startup_purchase.json()["reservation_id"]  # Identificador cuyo plazo se fuerza antes del startup.
@@ -428,12 +513,12 @@ class ApiEdgeCaseTests(unittest.TestCase):
         """La consulta global de reservas queda restringida al rol administrador."""
         self.client.put(  # Configura inventario para crear un recibo visible globalmente.
             "/admin/paquetes/202/inventario",  # Invoca la ruta administrativa habitual.
-            json={"total_capacity": 1},  # Provee un cupo para la reserva.
+            json={"total_capacity": 1, "travel_date": TRAVEL_DATE_JSON},  # Provee un cupo para la fecha de viaje.
             headers=self._admin_headers(),  # Usa las credenciales administrativas del fixture.
         )  # Deja el paquete reservable.
         purchase = self.client.post(  # Registra una reserva perteneciente al cliente.
             "/reservas",  # Crea el recibo mediante la compra transaccional.
-            json={"package_code": 202, "quantity": 1},  # Consume el único cupo.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Consume el único cupo de esa fecha.
             headers=self._client_headers(),  # Usa identidad cliente para generar el recibo.
         )  # Finaliza antes de comprobar visibilidad administrativa.
         client_response = self.client.get("/admin/reservas", headers=self._client_headers())  # Intenta consulta global con rol cliente.
@@ -446,16 +531,16 @@ class ApiEdgeCaseTests(unittest.TestCase):
         """No permite asociar una misma clave a paquetes o cantidades distintos."""
         self.client.put(  # Prepara capacidad para la primera operación.
             "/admin/paquetes/202/inventario",  # Usa el endpoint administrativo.
-            json={"total_capacity": 4},  # Configura cupos para que la segunda solicitud no falle por inventario.
+            json={"total_capacity": 4, "travel_date": TRAVEL_DATE_JSON},  # Configura cupos para que la segunda solicitud no falle por inventario.
             headers=self._admin_headers(),  # Autoriza configuración con rol apropiado.
         )  # Deja cuatro plazas disponibles.
         authorization = self._client_headers()  # Mantiene la misma identidad entre ambas llamadas.
         headers = {**authorization, "X-Idempotency-Key": "checkout-conflict-key"}  # Comparte clave bajo el mismo RUT.
         first = self.client.post(  # Registra la primera combinación de clave y cuerpo.
-            "/reservas", json={"package_code": 202, "quantity": 1}, headers=headers
+            "/reservas", json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON}, headers=headers
         )  # Consume un cupo y persiste su huella.
         conflict = self.client.post(  # Reutiliza clave con una cantidad semánticamente distinta.
-            "/reservas", json={"package_code": 202, "quantity": 2}, headers=headers
+            "/reservas", json={"package_code": 202, "quantity": 2, "travel_date": TRAVEL_DATE_JSON}, headers=headers
         )  # Debe comparar huellas antes de comprobar o descontar inventario.
         self.assertEqual(first.status_code, 201)  # Asegura que el caso inicial quedó guardado.
         self.assertEqual(conflict.status_code, 409)  # Señala uso ambiguo de clave en vez de cobrar/reservar de nuevo.
@@ -465,12 +550,12 @@ class ApiEdgeCaseTests(unittest.TestCase):
         """Al recrear servicios sobre el mismo archivo persisten cupos y recibos."""
         self.client.put(  # Configura el inventario inicial.
             "/admin/paquetes/202/inventario",  # La operación debe persistirse en SQLite.
-            json={"total_capacity": 5},  # Define cinco plazas totales.
+            json={"total_capacity": 5, "travel_date": TRAVEL_DATE_JSON},  # Define cinco plazas para la fecha.
             headers=self._admin_headers(),  # Usa permiso administrativo válido.
         )  # La configuración no queda solo en memoria.
         purchase = self.client.post(  # Consume dos plazas y crea una reserva local.
             "/reservas",  # Ejecuta el servicio de compra persistente.
-            json={"package_code": 202, "quantity": 2},  # Compra dos de cinco cupos.
+            json={"package_code": 202, "quantity": 2, "travel_date": TRAVEL_DATE_JSON},  # Compra dos de cinco cupos en esta fecha.
             headers={**self._client_headers(), "X-Idempotency-Key": "persistent-edge-key"},  # Vincula reserva y reintento al cliente existente.
         )  # La transacción confirma recibo y contador.
         self.assertEqual(purchase.status_code, 201)  # Verifica que existe una reserva antes de reiniciar.
@@ -490,7 +575,7 @@ class ApiEdgeCaseTests(unittest.TestCase):
         catalog = self.client.get("/paquetes")  # Consulta inventario con la nueva instancia de API.
         replay = self.client.post(  # Reintenta la compra original después de reconstruir todos los servicios.
             "/reservas",  # La clave debe sobrevivir porque se guarda en la base, no en memoria.
-            json={"package_code": 202, "quantity": 2},  # Reenvía el cuerpo original sin cambios.
+            json={"package_code": 202, "quantity": 2, "travel_date": TRAVEL_DATE_JSON},  # Reenvía el cuerpo original sin cambios.
             headers={
                 "Authorization": f"Bearer {login.json()['access_token']}",  # Usa un JWT nuevo después de reiniciar la API.
                 "X-Idempotency-Key": "persistent-edge-key",  # Reutiliza exactamente la clave persistida previamente.
@@ -505,12 +590,12 @@ class ApiEdgeCaseTests(unittest.TestCase):
     def test_concurrent_requests_with_same_key_create_only_one_reservation(self) -> None:
         """SQLite serializa peticiones paralelas de la misma clave/RUT."""
         service = self.app.state.compra_service  # Usa la misma instancia de compra que la API local.
-        service.configure_capacity(202, 1)  # Configura exactamente el único cupo que puede reservarse.
+        service.configure_capacity(202, TRAVEL_DATE, 1)  # Configura exactamente el único cupo de la fecha.
 
         def submit_same_purchase(_: int) -> object:
             """Ejecuta la misma compra y clave desde uno de los hilos."""
             return service.purchase_idempotently(  # El primero crea y el resto debe recuperar el mismo recibo.
-                "10.000.013-K", 202, 1, "concurrent-edge-idempotency-key"
+                "10.000.013-K", 202, 1, "concurrent-edge-idempotency-key", travel_date=TRAVEL_DATE
             )  # Todas las llamadas describen la misma operación lógica.
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:  # Simula ocho reintentos concurrentes del cliente.
@@ -606,7 +691,7 @@ class ApiEdgeCaseTests(unittest.TestCase):
     def test_purchase_retries_only_locked_operational_errors(self) -> None:
         """Un SQLITE_BUSY transitorio reintenta una vez antes de confirmar la compra."""
         service = CompraService(self.database_path, max_write_attempts=3, retry_delay_seconds=0.01)  # Inyecta política corta y determinista.
-        service.configure_capacity(202, 1)  # Deja un cupo para una compra que finalmente se confirmará.
+        service.configure_capacity(202, TRAVEL_DATE, 1)  # Deja un cupo para una compra que finalmente se confirmará.
         actual_purchase = service._purchase_once  # Conserva la operación transaccional para invocarla después del bloqueo simulado.
         attempts = [0]  # Cuenta las ejecuciones del bloque de compra.
 
@@ -618,7 +703,7 @@ class ApiEdgeCaseTests(unittest.TestCase):
             return actual_purchase(*args)  # Ejecuta la compra real en el intento posterior.
 
         with patch.object(service, "_purchase_once", side_effect=locked_once), patch("services.compra_service.time.sleep") as sleep:  # Sustituye una falla y elimina espera real del test.
-            result = service.purchase_idempotently("10.000.013-K", 202, 1, "retry-edge-key")  # Solicita compra con idempotencia durante el retry.
+            result = service.purchase_idempotently("10.000.013-K", 202, 1, "retry-edge-key", travel_date=TRAVEL_DATE)  # Solicita compra con idempotencia durante el retry.
         self.assertEqual(attempts[0], 2)  # Comprueba que hubo un reintento y no una repetición ilimitada.
         sleep.assert_called_once_with(0.01)  # Comprueba que se aplicó la pausa breve configurada.
         self.assertFalse(result.replayed)  # La compra se confirmó en este intento, no se recuperó de una clave previa.
@@ -626,24 +711,24 @@ class ApiEdgeCaseTests(unittest.TestCase):
     def test_non_locking_operational_error_is_not_retried(self) -> None:
         """Un error SQL no transitorio se traduce y no activa backoff."""
         service = CompraService(self.database_path, max_write_attempts=3, retry_delay_seconds=0.01)  # Configura más de un intento para detectar reintentos incorrectos.
-        service.configure_capacity(202, 1)  # Deja el servicio listo para una compra.
+        service.configure_capacity(202, TRAVEL_DATE, 1)  # Deja inventario fechado listo para una compra.
         with patch.object(  # Simula un error de SQL que no se debe tratar como bloqueo.
             service, "_purchase_once", side_effect=sqlite3.OperationalError("near 'BROKEN': syntax error")
         ) as purchase_attempt, patch("services.compra_service.time.sleep") as sleep:  # Vigila cantidad de intentos y pausas.
             with self.assertRaises(PurchasePersistenceError):  # Espera una excepción de dominio y no sqlite3 cruda.
-                service.purchase_idempotently("10.000.013-K", 202, 1, "syntax-edge-key")  # Ejecuta el camino fallido.
+                service.purchase_idempotently("10.000.013-K", 202, 1, "syntax-edge-key", travel_date=TRAVEL_DATE)  # Ejecuta el camino fallido.
         purchase_attempt.assert_called_once()  # Un error de sintaxis no se repite automáticamente.
         sleep.assert_not_called()  # Un error permanente no activa espera de retry.
 
     def test_constraint_violation_is_not_retried(self) -> None:
         """Una violación de integridad se convierte en error de dominio una sola vez."""
         service = CompraService(self.database_path, max_write_attempts=3, retry_delay_seconds=0.01)  # Deja varios intentos posibles para detectar un retry incorrecto.
-        service.configure_capacity(202, 1)  # Deja el esquema preparado para la compra simulada.
+        service.configure_capacity(202, TRAVEL_DATE, 1)  # Deja el inventario fechado preparado.
         with patch.object(  # Simula que SQLite rechaza una restricción de persistencia.
             service, "_purchase_once", side_effect=sqlite3.IntegrityError("UNIQUE constraint failed")
         ) as purchase_attempt, patch("services.compra_service.time.sleep") as sleep:  # Espía reintento y pausa.
             with self.assertRaises(PurchasePersistenceError):  # Exige que el detalle SQLite se traduzca a dominio.
-                service.purchase_idempotently("10.000.013-K", 202, 1, "constraint-edge-key")  # Ejecuta la compra que viola la restricción.
+                service.purchase_idempotently("10.000.013-K", 202, 1, "constraint-edge-key", travel_date=TRAVEL_DATE)  # Ejecuta la compra que viola la restricción.
         purchase_attempt.assert_called_once()  # No repite errores que persistirán con la misma solicitud.
         sleep.assert_not_called()  # No espera ni reintenta una restricción incumplida.
 
@@ -654,7 +739,7 @@ class ApiEdgeCaseTests(unittest.TestCase):
             service, "_purchase_once", side_effect=sqlite3.OperationalError("database is locked")
         ) as purchase_attempt, patch("services.compra_service.time.sleep") as sleep:  # Espía intentos y backoff sin hacerlos reales.
             with self.assertRaises(DatabaseBusyError):  # No permite que agotamiento de lock parezca éxito.
-                service.purchase_idempotently("10.000.013-K", 202, 1)  # Hace compra sin clave, que también usa la política de retry.
+                service.purchase_idempotently("10.000.013-K", 202, 1, travel_date=TRAVEL_DATE)  # Compra sin clave con la política de retry.
         self.assertEqual(purchase_attempt.call_count, 2)  # Respeta el máximo configurado.
         sleep.assert_called_once_with(0)  # Usa la pausa configurada entre el primer y segundo intento.
 

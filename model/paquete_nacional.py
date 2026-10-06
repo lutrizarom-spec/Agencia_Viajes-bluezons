@@ -8,5 +8,6 @@ class Paquete_Nacional(Paquete_Turistico):  # Hereda de Paquete_Turistico para c
         super().__init__(codigo, nombre, duracion, precio_base)  # Inicializa en la clase padre los datos comunes de este paquete.
 
     # El paquete nacional no tiene recargo y retorna el precio base en pesos tal cual.
-    def calcular_precio(self) -> float:  # Sobrescribe el cálculo heredado para definir explícitamente el precio nacional.
+    def calcular_precio(self, tasa_cambio: float | None = None) -> float:  # Sobrescribe el cálculo heredado sin aplicar conversión de moneda.
+        _ = tasa_cambio  # Conserva la firma compartida sin usar cotización para un precio en moneda local.
         return self.precio_base  # Devuelve el precio base consultando la propiedad pública heredada.

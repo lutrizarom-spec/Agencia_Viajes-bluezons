@@ -19,6 +19,7 @@ class Paquete_Internacional(Paquete_Turistico):  # Hereda los datos comunes del 
             raise ValueError("El estado del pasaporte debe ser un booleano (True/False).")  # Informa explícitamente que el dato ingresado no cumple el tipo requerido.
         self.__pasaporte_valido = estado  # Actualiza el atributo privado solo después de validar el valor.
 
-    # Polimorfismo: sobrescribe el cálculo multiplicando por el valor configurado del dólar (ejemplo: 900).
-    def calcular_precio(self) -> float:  # Define la regla de precio internacional y declara un resultado decimal.
-        return self.precio_base * 900  # Convierte el precio base según la tasa de ejemplo antes de retornarlo.
+    def calcular_precio(self, tasa_cambio: float | None = None) -> float:  # Permite fijar la tasa de la reserva y mantiene compatibilidad con el factor histórico.
+        tasa_aplicada = 900 if tasa_cambio is None else tasa_cambio  # Usa la tasa suministrada o el valor histórico para llamadas fuera de una reserva.
+        self._validar_monto(tasa_aplicada, "La tasa de cambio", permitir_cero=False)  # Impide tasas no numéricas, no finitas o no positivas.
+        return self.precio_base * tasa_aplicada  # Calcula CLP usando la cotización congelada por la compra cuando se entrega.

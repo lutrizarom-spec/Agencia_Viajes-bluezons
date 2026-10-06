@@ -13,6 +13,7 @@ class Paquete_Crucero(Paquete_Turistico):  # Hereda los datos comunes y personal
     def impuesto_puerto(self) -> float:  # Declara la propiedad e indica que el impuesto consultado es un valor decimal.
         return self.__impuesto_puerto  # Retorna el impuesto guardado para permitir que otros componentes lo consulten.
 
-    # Polimorfismo: multiplica el precio base por el valor del dólar y suma el impuesto fijo adicional.
-    def calcular_precio(self) -> float:  # Sobrescribe el método base para aplicar la regla específica de precio del crucero.
-        return (self.precio_base * 900) + self.__impuesto_puerto  # Convierte el precio base y agrega el impuesto portuario al total.
+    def calcular_precio(self, tasa_cambio: float | None = None) -> float:  # Convierte el precio usando la tasa de la reserva y agrega el impuesto portuario.
+        tasa_aplicada = 900 if tasa_cambio is None else tasa_cambio  # Usa la tasa indicada o conserva el factor histórico para llamadas antiguas.
+        self._validar_monto(tasa_aplicada, "La tasa de cambio", permitir_cero=False)  # Rechaza tasas inválidas antes de calcular el precio.
+        return (self.precio_base * tasa_aplicada) + self.__impuesto_puerto  # Aplica conversión y recargo portuario en ese orden.

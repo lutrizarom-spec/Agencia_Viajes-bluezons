@@ -52,7 +52,8 @@ class Paquete_Turistico:  # Sirve como clase padre para compartir atributos y co
         return self.__precio_base  # Entrega el valor base para que el paquete o sus subclases calculen el precio final.
 
     # Método que retorna el precio base y puede ser sobrescrito para aplicar reglas específicas en clases hijas.
-    def calcular_precio(self) -> float:  # Define el cálculo predeterminado y señala que su resultado es un número decimal.
+    def calcular_precio(self, tasa_cambio: float | None = None) -> float:  # Acepta una tasa para mantener una firma común entre subtipos.
+        _ = tasa_cambio  # Mantiene la firma polimórfica aunque el paquete genérico no convierte moneda.
         return self.__precio_base  # Usa el precio base sin recargos como precio para el paquete genérico.
 
     # Método para obtener una descripción legible que reúna los datos principales del paquete.

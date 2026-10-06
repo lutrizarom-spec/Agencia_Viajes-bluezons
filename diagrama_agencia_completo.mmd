@@ -1,90 +1,144 @@
-%% BORRADOR: basado unicamente en los nombres y reglas mencionados en la conversacion.
-%% Los miembros y multiplicidades marcados como pendientes requieren cotejo con el informe 2 original.
 classDiagram
 direction TB
 
 class Persona {
-  %% Atributos y operaciones no disponibles en el material revisado.
+    -rut: String
+    -nombre: String
+    -telefono_movil: String
+    +validar_datos(): boolean
 }
 
 class Cliente {
-  +validar_pasaporte(): tipo_pendiente
+    -id_cliente: int
+    -pasaporte: String
+    -correo: String
+    +validar_pasaporte(): boolean
+    +solicitar_reserva(): boolean
+    +consultar_itinerario(): String
 }
 
 class Empleado {
-  %% Atributos y operaciones no disponibles en el material revisado.
+    -id_empleado: int
 }
 
 class Administrador {
-  +aprobar_pago(): tipo_pendiente
+    +gestionar_proveedor(): void
+    +aprobar_pago(): void
 }
 
 class Agente_Viajes {
-  +atender_cliente(): tipo_pendiente
+    +atender_cliente(): void
+    +crear_reserva(): boolean
+    +vender_paquete(): boolean
 }
 
 class Paquete_Turistico {
-  -codigo: tipo_pendiente
-  +calcular_precio(): tipo_pendiente
+    -codigo: int
+    -nombre: String
+    -duracion: int
+    -precio_base: double
+    +obtener_detalle(): String
+    +calcular_precio(tasa_cambio: double): double
 }
 <<abstract>> Paquete_Turistico
 
 class Paquete_Nacional {
-  %% Miembros propios pendientes de cotejo.
+    +calcular_precio(tasa_cambio: double): double
 }
 
 class Paquete_Internacional {
-  %% Miembros propios pendientes de cotejo.
+    -pasaporte_valido: boolean
+    +calcular_precio(tasa_cambio: double): double
 }
 
 class Paquete_Crucero {
-  %% Miembros propios pendientes de cotejo.
+    -impuesto_puerto: double
+    +calcular_precio(tasa_cambio: double): double
 }
 
 class Servicio_Turistico {
-  -id_servicio: tipo_pendiente
-  +obtener_precio(): tipo_pendiente
+    -id_servicio: int
+    -nombre: String
+    -destino: String
+    -zona: String
+    -precio_base: double
+    +obtener_precio(): double
 }
 <<abstract>> Servicio_Turistico
 
 class Hotel_Estancia {
-  %% Miembros propios pendientes de cotejo.
+    -noches: int
+    +obtener_precio(): double
 }
 
 class Linea_Vuelo {
-  %% Miembros propios pendientes de cotejo.
+    -aerolinea: String
+    +obtener_precio(): double
 }
 
 class Excursion {
-  %% Miembros propios pendientes de cotejo.
+    -duracion_horas: int
+    +obtener_precio(): double
 }
 
 class Seguro {
-  %% Miembros propios pendientes de cotejo.
+    -cobertura: String
+    +obtener_precio(): double
 }
 
 class Reserva {
-  -tasa_cambio_aplicada: tipo_pendiente
-  +crear_reserva(): tipo_pendiente
-  +calcular_total(): tipo_pendiente
-  +validar_anticipo(): tipo_pendiente
+    -numero_reserva: String
+    -fecha_reserva: Date
+    -fecha_viaje: Date
+    -estado: String
+    -total: double
+    -tasa_cambio_aplicada: double
+    +confirmar(): boolean
+    +cancelar(): boolean
+    +validar_anticipo(): boolean
+    +calcular_total(): double
+}
+
+class Detalle_Reserva {
+    -id_detalle: int
+    -cantidad: int
+    -subtotal: double
+    +calcular_subtotal(): double
+}
+
+class Tipo_Cambio {
+    -fecha: Date
+    -valor_dolar: double
+    +obtener_valor(): double
 }
 
 class Pago {
-  +procesar_pago(): tipo_pendiente
+    -id_pago: String
+    -fecha: Date
+    -monto: double
+    -estado: String
+    -fecha_vencimiento: Date
+    +procesar_pago(): void
 }
 
 class Boleta {
-  +emitir(): tipo_pendiente
+    -num_boleta: int
+    -fecha: Date
+    -monto: double
+    +emitir(): void
 }
 
 class Proveedor {
-  %% cupos_disponibles se modela por fecha en Cupo, no como un total unico.
+    -id_proveedor: int
+    -nombre: String
+    +verificar_disponibilidad(fecha: Date): boolean
 }
 
 class Cupo {
-  -fecha: tipo_pendiente
-  -cupos_disponibles: tipo_pendiente
+    -fecha: Date
+    -cupos_totales: int
+    -cupos_reservados: int
+    +cupos_disponibles(): int
 }
 
 Persona <|-- Cliente
@@ -101,21 +155,20 @@ Servicio_Turistico <|-- Linea_Vuelo
 Servicio_Turistico <|-- Excursion
 Servicio_Turistico <|-- Seguro
 
-Cliente "1" -- "0..*" Reserva : realiza
-Reserva "1" -- "0..*" Pago : registra
-Reserva "0..*" -- "1" Paquete_Turistico : incluye
-Reserva "0..*" -- "0..*" Servicio_Turistico : recibe
-Pago "1" -- "0..1" Boleta : genera
-Administrador ..> Pago : gestiona y aprueba
-Administrador ..> Paquete_Turistico : gestiona
-Agente_Viajes ..> Cliente : atiende
-Proveedor "1" -- "0..*" Cupo : ofrece por fecha
+Cliente "1" -- "0..*" Reserva : solicita
+Agente_Viajes "1" -- "0..*" Reserva : crea
+Reserva "0..*" -- "1" Paquete_Turistico : origina
+Reserva "1" *-- "0..*" Detalle_Reserva : incluye
+Detalle_Reserva "0..*" -- "1" Servicio_Turistico : refiere
+Reserva "1" -- "1..*" Pago : recibe
+Pago "1" *-- "1" Boleta : genera
 
-note for Reserva "Una reserva pendiente puede mantenerse retenida 15 minutos y existir sin pagos. La tasa aplicada queda en Reserva para conservar el valor usado en ese momento. Confirmar que la retencion se mida desde la creacion. Tipos de atributos y retornos pendientes de cotejo."
-note for Paquete_Turistico "calcular_precio() aparece como abstracto segun la revision del diagrama del informe 2. Confirmar contra el enunciado y el codigo de ese proyecto. El tipo de retorno esta pendiente."
-note for Servicio_Turistico "obtener_precio() aparece como abstracto segun la revision del diagrama del informe 2. Confirmar contra el enunciado y el codigo de ese proyecto. El tipo de retorno esta pendiente."
-note for Cliente "Se conserva validar_pasaporte() solo en Cliente para evitar duplicarlo tambien en Paquete_Internacional. Confirmar que esta responsabilidad corresponda al dominio. Su tipo de retorno esta pendiente."
-note for Cupo "Clase propuesta para representar disponibilidad por fecha. Tipos, atributos adicionales, restricciones y multiplicidades deben cotejarse con el enunciado."
-note for Boleta "Se usa emitir() en vez de registrar_pago(); confirmar el resto de los atributos y el ciclo de vida de la boleta."
-note for Administrador "Los atributos y retornos de operaciones estan pendientes. La responsabilidad de atender clientes no se asigna a esta clase."
-note for Agente_Viajes "Los atributos y retornos de operaciones estan pendientes. atender_cliente() queda unicamente en esta clase."
+Administrador "1" -- "0..*" Proveedor : gestiona
+Administrador "1" ..> Pago : aprueba
+Proveedor "1" -- "0..*" Servicio_Turistico : provee
+Paquete_Turistico "1" -- "0..*" Cupo : disponibiliza por fecha
+Reserva "0..*" -- "1" Cupo : reserva para su fecha de viaje
+Reserva ..> Tipo_Cambio : congela la tasa obtenida al reservar
+
+note for Reserva "La reserva almacena la tasa USD/CLP aplicada. Se crea con un pago inicial pendiente del 50%; los abonos posteriores se acumulan hasta completar el saldo."
+note for Cupo "La disponibilidad se mantiene por paquete y fecha de viaje; reservar, cancelar o vencer un pago actualiza solo esa fecha."

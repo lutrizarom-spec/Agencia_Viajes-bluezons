@@ -9,8 +9,9 @@ import time  # Espera brevemente antes de reintentar una transacción bloqueada.
 import uuid  # Genera identificadores no predecibles para cada reserva.
 from contextlib import closing  # Garantiza el cierre de conexiones SQLite.
 from dataclasses import dataclass  # Define el resultado de compra como un valor inmutable.
-from datetime import datetime, timedelta, timezone  # Registra creación y vencimiento de pagos en UTC.
+from datetime import date, datetime, timedelta, timezone  # Registra fecha de viaje y timestamps de pagos en UTC.
 from pathlib import Path  # Acepta rutas locales de base de datos.
+from collections.abc import Callable  # Tipifica el proveedor de tasa de cambio inyectado desde FxService.
 
 from model.paquete_crucero import Paquete_Crucero  # Reconstruye la regla existente de precio de crucero.
 from model.paquete_internacional import Paquete_Internacional  # Reconstruye la regla existente de precio internacional.
@@ -42,6 +43,10 @@ class InvalidPackagePriceError(ValueError):
     """Señala que el paquete produciría un precio total no válido para una compra."""
 
 
+class ExchangeRateUnavailableError(RuntimeError):
+    """Señala que una compra internacional no tiene proveedor de tasa configurado."""
+
+
 class IdempotencyConflictError(ValueError):
     """Señala que una clave idempotente ya se usó con otra solicitud."""
 
@@ -70,13 +75,17 @@ class ReservationReceipt:
     rut: str  # RUT normalizado del usuario autenticado que compró.
     package_code: int  # Código del paquete comprado.
     quantity: int  # Cantidad de cupos consumidos por la compra.
+    travel_date: str  # Fecha de viaje que identifica la fila de inventario reservada.
     unit_price: float  # Precio por persona según la fórmula actual del subtipo.
     total_price: float  # Precio unitario multiplicado por la cantidad reservada.
+    exchange_rate_applied: float | None  # Tasa USD/CLP congelada para paquetes que convierten moneda.
+    total_paid: float  # Suma de los pagos confirmados de esta reserva.
+    balance_due: float  # Saldo que aún puede pagarse sin exceder el precio acordado.
     created_at: str  # Fecha UTC serializada de creación de la reserva.
     status: str = "confirmed"  # Estado persistido del ciclo de vida de la reserva.
     cancelled_at: str | None = None  # Fecha UTC de cancelación o None mientras siga confirmada.
-    payment_id: str = ""  # Identificador local del registro de pago asociado.
-    payment_status: str = "confirmed"  # Estado local pendiente, confirmado o fallido.
+    payment_id: str = ""  # Identificador del pago más reciente, si la reserva tiene alguno.
+    payment_status: str = "none"  # Estado local del pago más reciente o none si no tiene pagos.
     payment_expires_at: str | None = None  # Fecha UTC límite para completar el pago pendiente.
 
 
@@ -108,6 +117,7 @@ class CompraService:
         self,
         database_path: str | Path,
         *,
+        exchange_rate_provider: Callable[[], float] | None = None,
         max_write_attempts: int = 3,
         retry_delay_seconds: float = 0.05,
     ) -> None:
@@ -117,14 +127,16 @@ class CompraService:
         if isinstance(retry_delay_seconds, bool) or not isinstance(retry_delay_seconds, (int, float)) or not math.isfinite(retry_delay_seconds) or retry_delay_seconds < 0:  # Acepta espera cero para pruebas, pero no tiempos negativos/no finitos.
             raise ValueError("retry_delay_seconds debe ser finito y no negativo.")  # Evita pausas no válidas.
         self._database_path = str(database_path)  # Conserva la ruta usada para cada operación independiente.
+        self._exchange_rate_provider = exchange_rate_provider  # Inyecta FxService sin acoplar este servicio a su implementación.
         self._max_write_attempts = max_write_attempts  # Limita la cantidad máxima de transacciones intentadas.
         self._retry_delay_seconds = float(retry_delay_seconds)  # Normaliza la pausa entre intentos.
         self._ensure_schema()  # Crea las tablas auxiliares después de que exista paquetes.
 
-    def configure_capacity(self, package_code: int, total_capacity: int) -> int:
-        """Define cupos de un paquete sin reducirlos por debajo de reservas confirmadas."""
+    def configure_capacity(self, package_code: int, travel_date: date, total_capacity: int) -> int:
+        """Define cupos de un paquete para una fecha sin rebajar reservas existentes."""
         if isinstance(package_code, bool) or not isinstance(package_code, int) or not 1 <= package_code <= SQLITE_INTEGER_MAX:  # Rechaza códigos fuera del rango numérico de SQLite.
             raise ValueError("El código de paquete debe ser un entero positivo válido para SQLite.")  # Explica qué identificador se espera.
+        travel_date = self._normalize_travel_date(travel_date)  # Normaliza la fecha ISO antes de usarla como clave de inventario.
         if isinstance(total_capacity, bool) or not isinstance(total_capacity, int) or not 0 <= total_capacity <= SQLITE_INTEGER_MAX:  # Permite cero cupos, pero limita el entero a SQLite.
             raise ValueError("La capacidad debe ser un entero no negativo válido para SQLite.")  # Evita inventario inválido o imposible de persistir.
 
@@ -139,21 +151,21 @@ class CompraService:
 
                 connection.execute(  # Inserta cupos iniciales o actualiza una capacidad ya configurada.
                     """
-                    INSERT INTO package_inventory (package_code, total_capacity, reserved_capacity)
-                    VALUES (?, ?, 0)
-                    ON CONFLICT (package_code) DO UPDATE SET
+                    INSERT INTO package_inventory (package_code, travel_date, total_capacity, reserved_capacity)
+                    VALUES (?, ?, ?, 0)
+                    ON CONFLICT (package_code, travel_date) DO UPDATE SET
                         total_capacity = excluded.total_capacity
                     WHERE excluded.total_capacity >= package_inventory.reserved_capacity
                     """,
-                    (package_code, total_capacity),  # Parametriza el código y la capacidad configurada por el administrador.
+                    (package_code, travel_date, total_capacity),  # Parametriza paquete, fecha y capacidad.
                 )  # El WHERE impide rebajar la capacidad por debajo de las ventas existentes.
                 updated = connection.execute("SELECT changes()").fetchone()[0]  # Lee el conteo que SQLite devuelve para la última escritura.
                 if updated == 0:  # Distingue el conflicto de capacidad del caso de inserción/actualización exitosa.
                     raise CapacityBelowReservedError("La capacidad no puede ser menor a los cupos ya reservados.")  # Protege consistencia de inventario.
 
                 available = connection.execute(  # Calcula los cupos disponibles posteriores a la configuración.
-                    "SELECT total_capacity - reserved_capacity FROM package_inventory WHERE package_code = ?",  # Lee la fila recién insertada o actualizada.
-                    (package_code,),  # Limita la consulta al paquete configurado.
+                    "SELECT total_capacity - reserved_capacity FROM package_inventory WHERE package_code = ? AND travel_date = ?",  # Lee el inventario exacto que se configuró.
+                    (package_code, travel_date),  # Limita la consulta al paquete y fecha solicitados.
                 ).fetchone()[0]  # Obtiene el entero de cupos que puede venderse.
                 connection.commit()  # Confirma la nueva capacidad tras completar sus validaciones.
                 return int(available)  # Devuelve al administrador el inventario vendible actual.
@@ -161,9 +173,16 @@ class CompraService:
                 connection.rollback()  # Deshace cambios parciales para no dejar capacidad en estado incierto.
                 raise  # No oculta la causa ni la convierte en un resultado de éxito.
 
-    def purchase(self, rut: str, package_code: int, quantity: int) -> ReservationReceipt:
+    def purchase(
+        self,
+        rut: str,
+        package_code: int,
+        quantity: int,
+        *,
+        travel_date: date,
+    ) -> ReservationReceipt:
         """Confirma una compra no idempotente y conserva la firma pública existente."""
-        result = self.purchase_idempotently(rut, package_code, quantity)  # Delega a la operación transaccional común sin clave idempotente.
+        result = self.purchase_idempotently(rut, package_code, quantity, travel_date=travel_date)  # Delega a la operación transaccional común sin clave idempotente.
         return result.receipt  # Conserva el tipo de retorno usado por los consumidores existentes.
 
     def purchase_idempotently(
@@ -172,6 +191,8 @@ class CompraService:
         package_code: int,
         quantity: int,
         idempotency_key: str | None = None,
+        *,
+        travel_date: date,
     ) -> IdempotentPurchaseResult:
         """Compra una sola vez por RUT/clave y reproduce el recibo en reintentos."""
         normalized_rut = normalize_rut(rut)  # Asegura que el comprador quede vinculado al RUT autenticado normalizado.
@@ -180,11 +201,21 @@ class CompraService:
         if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= SQLITE_INTEGER_MAX:  # Exige cupos positivos que quepan en SQLite.
             raise ValueError("La cantidad debe ser un entero positivo válido para SQLite.")  # Impide reservas vacías, negativas o fuera de rango.
         normalized_key = self._normalize_idempotency_key(idempotency_key)  # Valida y canoniza la clave opcional antes de acceder a SQLite.
-        request_hash = hashlib.sha256(f"{package_code}:{quantity}".encode("ascii")).hexdigest() if normalized_key else None  # Vincula la clave al contenido semántico de la compra.
+        normalized_travel_date = self._normalize_travel_date(travel_date)  # Hace que la fecha de viaje forme parte del contrato persistido.
+        request_hash = hashlib.sha256(f"{package_code}:{quantity}:{normalized_travel_date}".encode("ascii")).hexdigest() if normalized_key else None  # Vincula idempotencia también a la fecha solicitada.
+
+        if normalized_key is not None:
+            previous = self._find_reservation_by_key(normalized_rut, normalized_key)  # Evita consultar FX en reintentos ya completados.
+            if previous is not None:
+                if previous[9] != request_hash:
+                    raise IdempotencyConflictError("La clave de idempotencia ya se usó con otra solicitud.")
+                return IdempotentPurchaseResult(receipt=self._receipt_from_row(previous), replayed=True)
+
+        exchange_rate = self._get_package_exchange_rate(package_code)  # Obtiene la tasa antes del bloqueo de escritura, solo cuando el subtipo la necesita.
 
         for attempt in range(1, self._max_write_attempts + 1):  # Ejecuta el número de intentos acotado por configuración.
             try:  # Repite la transacción completa solo para bloqueos SQLite transitorios.
-                receipt, replayed = self._purchase_once(normalized_rut, package_code, quantity, normalized_key, request_hash)  # Ejecuta una transacción indivisible o recupera el resultado anterior.
+                receipt, replayed = self._purchase_once(normalized_rut, package_code, quantity, normalized_travel_date, exchange_rate, normalized_key, request_hash)  # Ejecuta una transacción indivisible o recupera el resultado anterior.
                 return IdempotentPurchaseResult(receipt=receipt, replayed=replayed)  # Devuelve el recibo junto a su estado de repetición.
             except sqlite3.OperationalError as error:  # Distingue los bloqueos transitorios de otros errores de SQL.
                 if not self._is_database_locked(error):  # No reintenta sintaxis SQL ni otros OperationalError permanentes.
@@ -202,6 +233,8 @@ class CompraService:
         normalized_rut: str,
         package_code: int,
         quantity: int,
+        travel_date: str,
+        exchange_rate: float | None,
         idempotency_key: str | None,
         request_hash: str | None,
     ) -> tuple[ReservationReceipt, bool]:
@@ -219,11 +252,13 @@ class CompraService:
                         """
                         SELECT r.reservation_id, r.rut, r.package_code, r.quantity,
                                r.unit_price, r.total_price, r.created_at, r.status,
-                               r.cancelled_at, r.request_hash, p.payment_id,
-                               CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END,
-                               p.expires_at
+                               r.cancelled_at, r.request_hash, r.travel_date,
+                               r.exchange_rate_applied,
+                               (SELECT p.payment_id FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                               (SELECT CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                               (SELECT p.expires_at FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                               COALESCE((SELECT SUM(p.amount) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0)
                         FROM reservas AS r
-                        JOIN payments AS p ON p.reservation_id = r.reservation_id
                         WHERE r.rut = ? AND r.idempotency_key = ?
                         """,
                         (normalized_rut, idempotency_key),  # Acota la unicidad a la identidad autenticada y su clave.
@@ -234,28 +269,29 @@ class CompraService:
                         connection.commit()  # Finaliza la transacción de lectura antes de devolver el resultado existente.
                         return self._receipt_from_row(previous), True  # Reproduce recibo y estado de pago sin descontar cupos.
 
-                package_row = connection.execute(  # Recupera paquete y capacidad disponible bajo el bloqueo transaccional.
+                package_row = connection.execute(  # Recupera paquete y capacidad de la fecha bajo el bloqueo transaccional.
                     """
                     SELECT p.codigo, p.nombre, p.duracion, p.precio_base, p.tipo,
                            p.pasaporte_valido, p.impuesto_puerto,
                            i.total_capacity, i.reserved_capacity
                     FROM paquetes AS p
-                    LEFT JOIN package_inventory AS i ON i.package_code = p.codigo
+                    LEFT JOIN package_inventory AS i
+                      ON i.package_code = p.codigo AND i.travel_date = ?
                     WHERE p.codigo = ? AND p.activo = 1
                     """,
-                    (package_code,),  # Busca únicamente el paquete solicitado.
+                    (travel_date, package_code),  # Busca paquete y disponibilidad para la fecha solicitada.
                 ).fetchone()  # Lee producto e inventario en una sola consulta.
                 if package_row is None:  # Distingue un código inexistente de una falta de cupos.
                     raise PackageNotFoundError("No existe el paquete solicitado.")  # La API traducirá esta condición a HTTP 404.
                 if package_row[7] is None:  # Una fila NULL indica que un administrador aún no configuró capacidad.
                     raise InventoryNotConfiguredError("El paquete todavía no tiene cupos configurados.")  # Impide vender disponibilidad desconocida.
 
-                available = int(package_row[7]) - int(package_row[8])  # Calcula cupos restantes mientras otras compras están bloqueadas.
+                available = int(package_row[7]) - int(package_row[8])  # Calcula cupos restantes en la fecha solicitada.
                 if quantity > available:  # Rechaza una cantidad superior al inventario.
                     raise InsufficientCapacityError("No hay cupos suficientes para la cantidad solicitada.")  # No genera recibo ni descuento.
 
                 package = self._build_package(package_row)  # Reconstruye subtipo y conserva la regla de precio actual.
-                unit_price = package.calcular_precio()  # Calcula el precio unitario con el método polimórfico original.
+                unit_price = package.calcular_precio(exchange_rate) if exchange_rate is not None else package.calcular_precio()  # Congela la tasa FX en el precio unitario cuando el subtipo la necesita.
                 if not math.isfinite(unit_price) or unit_price <= 0:  # Evita almacenar tasas/valores no finitos o no positivos.
                     raise InvalidPackagePriceError("El paquete tiene un precio inválido para la compra.")  # No cambia fórmulas de dominio.
                 total_price = unit_price * quantity  # Calcula el monto que queda persistido en el recibo.
@@ -266,10 +302,10 @@ class CompraService:
                     """
                     UPDATE package_inventory
                     SET reserved_capacity = reserved_capacity + ?
-                    WHERE package_code = ?
+                    WHERE package_code = ? AND travel_date = ?
                       AND total_capacity - reserved_capacity >= ?
                     """,
-                    (quantity, package_code, quantity),  # Mantiene datos fuera del SQL y vuelve a comprobar capacidad al escribir.
+                    (quantity, package_code, travel_date, quantity),  # Revalida atómicamente la misma fecha que se leyó.
                 ).rowcount  # Cuenta cuántas filas afectó la actualización condicional.
                 if updated != 1:  # Protege contra una condición que cambiase entre lectura y actualización.
                     raise InsufficientCapacityError("No hay cupos suficientes para la cantidad solicitada.")  # Previene sobreventa incluso ante escrituras concurrentes.
@@ -278,12 +314,12 @@ class CompraService:
                     """
                     INSERT INTO reservas (
                         reservation_id, rut, package_code, quantity,
-                        unit_price, total_price, created_at,
+                        unit_price, total_price, travel_date, exchange_rate_applied, created_at,
                         idempotency_key, request_hash
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (reservation_id, normalized_rut, package_code, quantity, unit_price, total_price, created_at, idempotency_key, request_hash),  # Conserva compra y clave en una sola fila.
+                    (reservation_id, normalized_rut, package_code, quantity, unit_price, total_price, travel_date, exchange_rate, created_at, idempotency_key, request_hash),  # Conserva viaje, precio y tasa aplicada para auditoría.
                 )  # La referencia al catálogo impide reservas de paquetes inexistentes.
                 connection.execute(  # Abre un pago local pendiente en la misma transacción que retiene los cupos.
                     """
@@ -292,14 +328,14 @@ class CompraService:
                     )
                     VALUES (?, ?, ?, 'pending', ?, ?, ?)
                     """,
-                    (payment_id, reservation_id, total_price, created_at, created_at, expires_at),  # Congela monto, fechas y vencimiento del pago local.
+                    (payment_id, reservation_id, round(total_price * 0.5, 2), created_at, created_at, expires_at),  # Abre el anticipo mínimo del 50 % y fija su plazo.
                 )  # Un fallo al insertar el pago revierte también la reserva y la retención de inventario.
                 connection.commit()  # Confirma cupos, recibo y clave idempotente como una sola unidad.
             except Exception:  # Revierte dominio, persistencia u otros errores ocurridos antes del commit.
                 connection.rollback()  # Evita reservar cupos sin un recibo/clave confirmados.
                 raise  # Mantiene intacta la excepción original para su traducción posterior.
 
-        return self._receipt_from_values(reservation_id, normalized_rut, package_code, quantity, unit_price, total_price, created_at, payment_id), False  # Devuelve reserva y pago pendiente recién creados.
+        return self._receipt_from_values(reservation_id, normalized_rut, package_code, quantity, travel_date, unit_price, total_price, exchange_rate, created_at, payment_id), False  # Devuelve reserva, tasa aplicada y anticipo pendiente.
 
     @staticmethod
     def _normalize_idempotency_key(idempotency_key: str | None) -> str | None:
@@ -310,6 +346,77 @@ class CompraService:
         if not normalized or len(normalized) > 128 or any(ord(character) < 33 or ord(character) > 126 for character in normalized):  # Limita la clave a ASCII imprimible sin espacios internos.
             raise ValueError("X-Idempotency-Key debe tener entre 1 y 128 caracteres ASCII imprimibles.")  # Rechaza claves ambiguas o excesivas.
         return normalized  # Devuelve la representación que se indexará en la base.
+
+    @staticmethod
+    def _normalize_travel_date(travel_date: date) -> str:
+        """Valida y normaliza la fecha local solicitada para el viaje."""
+        if isinstance(travel_date, datetime) or not isinstance(travel_date, date):
+            raise ValueError("travel_date debe ser una fecha válida.")
+        return travel_date.isoformat()
+
+    def _get_package_exchange_rate(self, package_code: int) -> float | None:
+        """Obtiene FX solo para paquetes internacionales y cruceros."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT tipo FROM paquetes WHERE codigo = ? AND activo = 1",
+                (package_code,),
+            ).fetchone()
+        if row is None:
+            raise PackageNotFoundError("No existe el paquete solicitado.")
+        if row[0] not in ("internacional", "crucero"):
+            return None
+        if self._exchange_rate_provider is None:
+            raise ExchangeRateUnavailableError("No hay un servicio USD/CLP configurado para esta compra.")
+        rate = self._exchange_rate_provider()
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate) or rate <= 0:
+            raise InvalidPackagePriceError("El proveedor devolvió una tasa USD/CLP inválida.")
+        return float(rate)
+
+    def _find_reservation_by_key(
+        self,
+        normalized_rut: str,
+        idempotency_key: str,
+    ) -> tuple[object, ...] | None:
+        """Lee el recibo anterior para repetir una compra sin volver a consultar FX."""
+        query = """
+            SELECT r.reservation_id, r.rut, r.package_code, r.quantity,
+                   r.unit_price, r.total_price, r.created_at, r.status,
+                   r.cancelled_at, r.request_hash, r.travel_date,
+                   r.exchange_rate_applied,
+                   (SELECT p.payment_id FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                   (SELECT CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                   (SELECT p.expires_at FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                   COALESCE((SELECT SUM(p.amount) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0)
+            FROM reservas AS r
+            WHERE r.rut = ? AND r.idempotency_key = ?
+        """
+        with closing(self._connect()) as connection:
+            return connection.execute(query, (normalized_rut, idempotency_key)).fetchone()
+
+    @staticmethod
+    def _find_reservation_by_id(
+        connection: sqlite3.Connection,
+        reservation_id: str,
+    ) -> ReservationReceipt:
+        """Lee el recibo actualizado con el último pago y el saldo acumulado."""
+        row = connection.execute(
+            """
+            SELECT r.reservation_id, r.rut, r.package_code, r.quantity,
+                   r.unit_price, r.total_price, r.created_at, r.status,
+                   r.cancelled_at, r.request_hash, r.travel_date,
+                   r.exchange_rate_applied,
+                   (SELECT p.payment_id FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                   (SELECT CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                   (SELECT p.expires_at FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                   COALESCE((SELECT SUM(p.amount) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0)
+            FROM reservas AS r
+            WHERE r.reservation_id = ?
+            """,
+            (reservation_id,),
+        ).fetchone()
+        if row is None:
+            raise ReservationNotFoundError("No se encontró la reserva solicitada.")
+        return CompraService._receipt_from_row(row)
 
     @staticmethod
     def _is_database_locked(error: sqlite3.OperationalError) -> bool:
@@ -329,14 +436,18 @@ class CompraService:
             rut=str(row[1]),  # Recupera el RUT canónico persistido.
             package_code=int(row[2]),  # Recupera el código de catálogo.
             quantity=int(row[3]),  # Recupera la cantidad original comprada.
+            travel_date=str(row[10]),  # Recupera la fecha de viaje usada para retener cupos.
             unit_price=float(row[4]),  # Recupera el precio unitario acordado.
             total_price=float(row[5]),  # Recupera el total original, sin recalcularlo con precios actuales.
+            exchange_rate_applied=None if row[11] is None else float(row[11]),  # Recupera la tasa aplicada, si correspondía.
+            total_paid=float(row[15]),  # Suma únicamente los pagos confirmados.
+            balance_due=max(0.0, float(row[5]) - float(row[15])),  # Limita el saldo pendiente a cero ante diferencias de redondeo.
             created_at=str(row[6]),  # Recupera la fecha de confirmación original.
             status=str(row[7]),  # Recupera estado actual: confirmado o cancelado.
             cancelled_at=None if row[8] is None else str(row[8]),  # Conserva fecha de cancelación cuando existe.
-            payment_id=str(row[10]),  # Recupera el identificador del pago local asociado.
-            payment_status=str(row[11]),  # Recupera el estado vigente del pago.
-            payment_expires_at=None if row[12] is None else str(row[12]),  # Recupera el vencimiento asociado al pago.
+            payment_id="" if row[12] is None else str(row[12]),  # Recupera el pago más reciente cuando existe.
+            payment_status="none" if row[13] is None else str(row[13]),  # Expone none para reservas sin pagos.
+            payment_expires_at=None if row[14] is None else str(row[14]),  # Recupera el vencimiento del pago más reciente.
         )  # Entrega exactamente el recibo de la primera ejecución.
 
     @staticmethod
@@ -345,8 +456,10 @@ class CompraService:
         rut: str,
         package_code: int,
         quantity: int,
+        travel_date: str,
         unit_price: float,
         total_price: float,
+        exchange_rate: float | None,
         created_at: str,
         payment_id: str,
     ) -> ReservationReceipt:
@@ -356,54 +469,53 @@ class CompraService:
             rut=rut,  # Vincula el recibo al RUT normalizado autenticado.
             package_code=package_code,  # Incluye el paquete comprado.
             quantity=quantity,  # Incluye los cupos descontados.
+            travel_date=travel_date,  # Conserva la fecha de disponibilidad reservada.
             unit_price=unit_price,  # Incluye precio unitario aplicado.
             total_price=total_price,  # Incluye el importe total confirmado.
+            exchange_rate_applied=exchange_rate,  # Conserva la cotización congelada en esta compra.
+            total_paid=0.0,  # El pago inicial todavía está pendiente.
+            balance_due=total_price,  # El saldo se reduce al confirmar cada pago.
             created_at=created_at,  # Incluye timestamp UTC guardado.
             payment_id=payment_id,  # Asocia al recibo el pago local creado con la reserva.
             payment_status="pending",  # La simulación comienza sin afirmar que hubo un cobro real.
             payment_expires_at=(datetime.fromisoformat(created_at) + timedelta(seconds=PAYMENT_PENDING_TTL_SECONDS)).isoformat(),  # Expone la fecha límite del pago creado.
         )  # Retorna el resultado de negocio recién confirmado.
 
-    def get_available_capacity(self, package_code: int) -> int | None:
-        """Devuelve cupos restantes o None si el paquete no tiene inventario configurado."""
+    def get_available_capacity(self, package_code: int, travel_date: date | None = None) -> int | None:
+        """Devuelve cupos para una fecha, o el total agregado si no se indica fecha."""
         with closing(self._connect()) as connection:  # Usa una conexión acotada solo para leer el inventario.
-            row = connection.execute(  # Calcula disponibilidad a partir de capacidad menos cupos ya vendidos.
-                """
-                SELECT total_capacity - reserved_capacity
-                FROM package_inventory
-                WHERE package_code = ?
-                """,
-                (package_code,),  # Limita la lectura al código consultado.
-            ).fetchone()  # Obtiene cero o un resultado por la clave primaria.
-        return None if row is None else int(row[0])  # Distingue inventario desconocido de una disponibilidad explícita de cero.
+            if travel_date is None:
+                row = connection.execute(
+                    "SELECT SUM(total_capacity - reserved_capacity) FROM package_inventory WHERE package_code = ? AND travel_date != 'legacy'",
+                    (package_code,),
+                ).fetchone()
+            else:
+                normalized_date = self._normalize_travel_date(travel_date)
+                row = connection.execute(
+                    "SELECT total_capacity - reserved_capacity FROM package_inventory WHERE package_code = ? AND travel_date = ?",
+                    (package_code, normalized_date),
+                ).fetchone()
+        return None if row is None or row[0] is None else int(row[0])  # Distingue inventario desconocido de una disponibilidad explícita de cero.
 
     def list_reservations(self, rut: str | None = None) -> list[ReservationReceipt]:
         """Lista todas las reservas para administración o solo las de un RUT."""
+        query = """
+            SELECT r.reservation_id, r.rut, r.package_code, r.quantity,
+                   r.unit_price, r.total_price, r.created_at, r.status,
+                   r.cancelled_at, r.request_hash, r.travel_date,
+                   r.exchange_rate_applied,
+                   (SELECT p.payment_id FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                   (SELECT CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                   (SELECT p.expires_at FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                   COALESCE((SELECT SUM(p.amount) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0)
+            FROM reservas AS r
+        """
         if rut is None:  # None se reserva para el endpoint administrativo que ya validó rol.
-            query = """
-                SELECT r.reservation_id, r.rut, r.package_code, r.quantity,
-                       r.unit_price, r.total_price, r.created_at, r.status,
-                       r.cancelled_at, r.request_hash, p.payment_id,
-                       CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END,
-                       p.expires_at
-                FROM reservas AS r
-                JOIN payments AS p ON p.reservation_id = r.reservation_id
-                ORDER BY r.created_at DESC, r.reservation_id DESC
-            """  # Lista de forma estable todas las reservas sin aceptar filtro externo.
+            query += " ORDER BY r.created_at DESC, r.reservation_id DESC"  # Conserva orden estable sin duplicar reservas por cada pago.
             parameters: tuple[object, ...] = ()  # La consulta administrativa no agrega parámetros.
         else:  # Una consulta de cliente siempre queda acotada a la identidad del token.
             normalized_rut = normalize_rut(rut)  # Canonicaliza para que el filtro coincida con el dato persistido.
-            query = """
-                SELECT r.reservation_id, r.rut, r.package_code, r.quantity,
-                       r.unit_price, r.total_price, r.created_at, r.status,
-                       r.cancelled_at, r.request_hash, p.payment_id,
-                       CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END,
-                       p.expires_at
-                FROM reservas AS r
-                JOIN payments AS p ON p.reservation_id = r.reservation_id
-                WHERE r.rut = ?
-                ORDER BY r.created_at DESC, r.reservation_id DESC
-            """  # La condición por RUT se ejecuta en SQLite antes de devolver datos.
+            query += " WHERE r.rut = ? ORDER BY r.created_at DESC, r.reservation_id DESC"  # La condición por RUT corre antes de devolver datos.
             parameters = (normalized_rut,)  # Parametriza el filtro de identidad.
 
         with closing(self._connect()) as connection:  # Abre una lectura corta sobre el archivo SQLite compartido.
@@ -450,11 +562,13 @@ class CompraService:
                     """
                     SELECT r.reservation_id, r.rut, r.package_code, r.quantity,
                            r.unit_price, r.total_price, r.created_at, r.status,
-                           r.cancelled_at, r.request_hash, p.payment_id,
-                           CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END,
-                           p.expires_at
+                           r.cancelled_at, r.request_hash, r.travel_date,
+                           r.exchange_rate_applied,
+                           (SELECT p.payment_id FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                           (SELECT CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                           (SELECT p.expires_at FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
+                           COALESCE((SELECT SUM(p.amount) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0)
                     FROM reservas AS r
-                    JOIN payments AS p ON p.reservation_id = r.reservation_id
                     WHERE r.reservation_id = ?
                     """,
                     (reservation_id,),  # Busca únicamente el UUID solicitado.
@@ -480,7 +594,7 @@ class CompraService:
                 if changed != 1:  # Protege contra cualquier estado inesperado aunque BEGIN IMMEDIATE serialice escritores.
                     raise PurchasePersistenceError("No se pudo cambiar el estado de la reserva.")  # No libera cupos si no hay transición.
 
-                connection.execute(  # Cierra el intento de pago abierto si se cancela antes de resolverlo.
+                connection.execute(  # Cierra todos los intentos de pago pendientes de esta reserva.
                     """
                     UPDATE payments
                     SET status = 'failed', updated_at = ?
@@ -493,15 +607,15 @@ class CompraService:
                     """
                     UPDATE package_inventory
                     SET reserved_capacity = reserved_capacity - ?
-                    WHERE package_code = ? AND reserved_capacity >= ?
+                    WHERE package_code = ? AND travel_date = ? AND reserved_capacity >= ?
                     """,
-                    (row[3], row[2], row[3]),  # Impide que un error de datos deje capacidad reservada negativa.
+                    (row[3], row[2], row[10], row[3]),  # Libera solo la fecha reservada y evita capacidad negativa.
                 ).rowcount  # Comprueba que el inventario de ese paquete exista y tenía cupos suficientes reservados.
                 if released != 1:  # Una discrepancia sería una corrupción entre recibo e inventario.
                     raise PurchasePersistenceError("El inventario no coincide con los cupos de la reserva.")  # Lanza antes del commit para revertir el estado.
 
                 connection.commit()  # Confirma estado y recuperación de capacidad conjuntamente.
-                return self._receipt_from_row((*row[:7], "cancelled", cancelled_at, row[9], row[10], "failed" if row[11] == "pending" else row[11], row[12]))  # Devuelve estados de reserva y pago actualizados.
+                return self._find_reservation_by_id(connection, reservation_id)  # Devuelve la reserva con todos sus pagos y saldos actualizados.
             except (ReservationNotFoundError, PurchasePersistenceError):  # Revierte antes de propagar errores de dominio explícitos.
                 connection.rollback()  # Conserva la reserva y los cupos si no pudo completar ambas operaciones.
                 raise  # Propaga el error original para que la API lo traduzca explícitamente.
@@ -514,9 +628,10 @@ class CompraService:
         reservation_id: str,
         rut: str,
         *,
+        payment_id: str | None = None,
         is_admin: bool = False,
     ) -> PaymentReceipt:
-        """Devuelve el estado del pago solo al dueño de la reserva o a un administrador."""
+        """Devuelve un pago específico o el más reciente al dueño o administrador."""
         normalized_rut = normalize_rut(rut)  # Normaliza la identidad autenticada antes de comprobar propiedad.
         with closing(self._connect()) as connection:  # Abre una conexión de solo lectura para el estado persistido.
             row = connection.execute(  # Obtiene pago y propietario en una consulta para no filtrar reservas ajenas.
@@ -527,12 +642,111 @@ class CompraService:
                 FROM payments AS p
                 JOIN reservas AS r ON r.reservation_id = p.reservation_id
                 WHERE p.reservation_id = ?
+                  AND (? IS NULL OR p.payment_id = ?)
+                ORDER BY p.created_at DESC, p.payment_id DESC
+                LIMIT 1
                 """,
-                (reservation_id,),  # Parametriza el UUID de reserva.
+                (reservation_id, payment_id, payment_id),  # Filtra opcionalmente por el identificador preciso del pago.
             ).fetchone()  # Retorna None cuando reserva/pago no existe.
         if row is None or (not is_admin and row[6] != normalized_rut):  # Oculta existencia y titularidad ante usuarios no autorizados.
             raise ReservationNotFoundError("No se encontró un pago accesible.")  # Usa el mismo error para inexistencia y propiedad ajena.
         return self._payment_from_row((*row[:6], row[7]))  # Omite el RUT interno y entrega los campos públicos del pago local.
+
+    def list_payments(
+        self,
+        reservation_id: str,
+        rut: str,
+        *,
+        is_admin: bool = False,
+    ) -> list[PaymentReceipt]:
+        """Lista todos los pagos de una reserva al titular o a un administrador."""
+        normalized_rut = normalize_rut(rut)
+        with closing(self._connect()) as connection:
+            reservation = connection.execute(
+                "SELECT rut FROM reservas WHERE reservation_id = ?",
+                (reservation_id,),
+            ).fetchone()
+            if reservation is None or (not is_admin and reservation[0] != normalized_rut):
+                raise ReservationNotFoundError("No se encontró una reserva accesible.")
+            rows = connection.execute(
+                """
+                SELECT payment_id, reservation_id, amount,
+                       CASE WHEN expired_at IS NOT NULL THEN 'expired' ELSE status END,
+                       created_at, updated_at, expires_at
+                FROM payments
+                WHERE reservation_id = ?
+                ORDER BY created_at, payment_id
+                """,
+                (reservation_id,),
+            ).fetchall()
+        return [self._payment_from_row(row) for row in rows]
+
+    def create_payment(
+        self,
+        reservation_id: str,
+        rut: str,
+        amount: float,
+        *,
+        is_admin: bool = False,
+    ) -> PaymentReceipt:
+        """Crea un pago parcial dentro del saldo, con un único intento pendiente."""
+        self.expire_pending_payments()
+        normalized_rut = normalize_rut(rut)
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) or amount <= 0:
+            raise ValueError("El monto del pago debe ser finito y mayor que cero.")
+        now = datetime.now(timezone.utc)
+        expires_at = (now + timedelta(seconds=PAYMENT_PENDING_TTL_SECONDS)).isoformat()
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                reservation = connection.execute(
+                    """
+                    SELECT rut, total_price, status,
+                           COALESCE((SELECT SUM(amount) FROM payments
+                                     WHERE reservation_id = reservas.reservation_id
+                                       AND status = 'confirmed'), 0),
+                           EXISTS(SELECT 1 FROM payments
+                                  WHERE reservation_id = reservas.reservation_id
+                                    AND status = 'pending' AND expired_at IS NULL)
+                    FROM reservas
+                    WHERE reservation_id = ?
+                    """,
+                    (reservation_id,),
+                ).fetchone()
+                if reservation is None or (not is_admin and reservation[0] != normalized_rut):
+                    raise ReservationNotFoundError("No se encontró una reserva accesible.")
+                if reservation[2] != "confirmed":
+                    raise PaymentTransitionConflictError("La reserva no está activa para recibir pagos.")
+                if reservation[4]:
+                    raise PaymentTransitionConflictError("La reserva ya tiene un pago pendiente.")
+                balance_due = float(reservation[1]) - float(reservation[3])
+                if amount > balance_due + 1e-9:
+                    raise ValueError("El monto supera el saldo pendiente de la reserva.")
+                payment_id = str(uuid.uuid4())
+                timestamp = now.isoformat()
+                connection.execute(
+                    """
+                    INSERT INTO payments (
+                        payment_id, reservation_id, amount, status,
+                        created_at, updated_at, expires_at
+                    )
+                    VALUES (?, ?, ?, 'pending', ?, ?, ?)
+                    """,
+                    (payment_id, reservation_id, float(amount), timestamp, timestamp, expires_at),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return PaymentReceipt(
+            payment_id=payment_id,
+            reservation_id=reservation_id,
+            amount=float(amount),
+            status="pending",
+            created_at=timestamp,
+            updated_at=timestamp,
+            expires_at=expires_at,
+        )
 
     def expire_pending_payments(self, *, now: datetime | None = None) -> int:
         """Marca vencidos pagos pendientes y libera sus reservas en una transacción."""
@@ -563,7 +777,11 @@ class CompraService:
                 connection.execute("BEGIN IMMEDIATE")  # Serializa vencimientos con confirmaciones, cancelaciones y nuevas reservas.
                 expired_rows = connection.execute(  # Captura solo pagos pendientes cuyo plazo ya terminó.
                     """
-                    SELECT p.payment_id, p.reservation_id, r.package_code, r.quantity
+                    SELECT p.payment_id, p.reservation_id, r.package_code, r.quantity,
+                           r.travel_date,
+                           COALESCE((SELECT SUM(paid.amount) FROM payments AS paid
+                                     WHERE paid.reservation_id = r.reservation_id
+                                       AND paid.status = 'confirmed'), 0)
                     FROM payments AS p
                     JOIN reservas AS r ON r.reservation_id = p.reservation_id
                     WHERE p.status = 'pending'
@@ -574,7 +792,7 @@ class CompraService:
                     """,
                     (current_iso,),  # Limita el barrido a vencimientos hasta el instante UTC recibido.
                 ).fetchall()  # El bloqueo evita que estos estados cambien antes de actualizarse.
-                for payment_id, reservation_id, package_code, quantity in expired_rows:  # Resuelve cada pago y su retención asociada.
+                for payment_id, reservation_id, package_code, quantity, travel_date, total_paid in expired_rows:  # Resuelve el intento y la retención que aún dependa de él.
                     changed = connection.execute(  # Marca el pago vencido como terminal y conserva tanto fecha límite como instante de proceso.
                         """
                         UPDATE payments
@@ -586,7 +804,10 @@ class CompraService:
                     if changed != 1:  # Evita liberar inventario si no se registró el vencimiento.
                         raise PurchasePersistenceError("No se pudo marcar el pago como vencido.")  # Rechaza una transición inconsistente.
 
-                    cancelled = connection.execute(  # Cancela la reserva asociada al pago ya vencido.
+                    if float(total_paid) > 0:  # Un abono confirmado conserva la reserva; solo vence este intento de pago.
+                        continue  # La capacidad sigue retenida para que el cliente pueda continuar pagando el saldo.
+
+                    cancelled = connection.execute(  # Cancela la reserva si venció antes de confirmar cualquier anticipo.
                         """
                         UPDATE reservas
                         SET status = 'cancelled', cancelled_at = ?
@@ -601,9 +822,9 @@ class CompraService:
                         """
                         UPDATE package_inventory
                         SET reserved_capacity = reserved_capacity - ?
-                        WHERE package_code = ? AND reserved_capacity >= ?
+                        WHERE package_code = ? AND travel_date = ? AND reserved_capacity >= ?
                         """,
-                        (quantity, package_code, quantity),  # Impide que la liberación deje capacidad reservada negativa.
+                        (quantity, package_code, travel_date, quantity),  # Devuelve cupos solo para la fecha de viaje reservada.
                     ).rowcount  # Comprueba que existe capacidad suficiente para liberar.
                     if released != 1:  # Trata discrepancias como errores y revierte el barrido completo.
                         raise PurchasePersistenceError("El inventario no coincide con el pago vencido.")  # Evita desincronizar compra y disponibilidad.
@@ -614,15 +835,21 @@ class CompraService:
                 connection.rollback()  # Impide estados o liberaciones parciales incluso con varias reservas.
                 raise  # Deja que expire_pending_payments aplique la traducción/retry correspondiente.
 
-    def transition_payment(self, reservation_id: str, target_status: str) -> PaymentReceipt:
-        """Simula una transición administrativa pendiente→confirmado o pendiente→fallido."""
+    def transition_payment(
+        self,
+        reservation_id: str,
+        target_status: str,
+        *,
+        payment_id: str | None = None,
+    ) -> PaymentReceipt:
+        """Simula la transición de un pago pendiente identificado."""
         if target_status not in ("confirmed", "failed"):  # Solo se permiten resultados terminales desde la consola administrativa.
             raise ValueError("El estado de pago debe ser 'confirmed' o 'failed'.")  # No permite que una petición restaure pagos a pendiente.
         self.expire_pending_payments()  # Aplica vencimientos pendientes antes de aceptar un resultado administrativo.
 
         for attempt in range(1, self._max_write_attempts + 1):  # Reutiliza la política limitada de retry de escrituras del servicio.
             try:  # Repite únicamente bloqueos transitorios de SQLite.
-                return self._transition_payment_once(reservation_id, target_status)  # Cambia pago, reserva e inventario atómicamente.
+                return self._transition_payment_once(reservation_id, target_status, payment_id)  # Cambia pago, reserva e inventario atómicamente.
             except sqlite3.OperationalError as error:  # Distingue un lock de otros errores SQL permanentes.
                 if not self._is_database_locked(error):  # Evita reintentos de sintaxis, disco u otros fallos.
                     raise PurchasePersistenceError("SQLite rechazó la actualización del pago.") from error  # Traduce el error técnico a dominio.
@@ -634,8 +861,13 @@ class CompraService:
 
         raise DatabaseBusyError("No fue posible adquirir la base de datos para actualizar el pago.")  # Salvaguarda del bucle acotado.
 
-    def _transition_payment_once(self, reservation_id: str, target_status: str) -> PaymentReceipt:
-        """Ejecuta el cambio de pago y, si falla, cancela/libera cupos en la misma transacción."""
+    def _transition_payment_once(
+        self,
+        reservation_id: str,
+        target_status: str,
+        payment_id: str | None,
+    ) -> PaymentReceipt:
+        """Ejecuta el cambio del pago y cancela solo si aún no hubo abonos confirmados."""
         with closing(self._connect()) as connection:  # Abre una conexión nueva para esta tentativa transaccional.
             connection.execute("BEGIN IMMEDIATE")  # Serializa esta transición respecto a compras y cancelaciones.
             try:  # Mantiene pagos, reserva e inventario sincronizados frente a cualquier error.
@@ -643,12 +875,21 @@ class CompraService:
                     """
                     SELECT p.payment_id, p.reservation_id, p.amount, p.status,
                            p.created_at, p.updated_at, r.package_code,
-                           r.quantity, r.status, p.expires_at, p.expired_at
+                           r.quantity, r.status, p.expires_at, p.expired_at,
+                           r.travel_date,
+                           COALESCE((SELECT SUM(paid.amount) FROM payments AS paid
+                                     WHERE paid.reservation_id = r.reservation_id
+                                       AND paid.status = 'confirmed'), 0),
+                           r.total_price
                     FROM payments AS p
                     JOIN reservas AS r ON r.reservation_id = p.reservation_id
                     WHERE p.reservation_id = ?
+                      AND (? IS NULL OR p.payment_id = ?)
+                    ORDER BY CASE WHEN p.status = 'pending' THEN 0 ELSE 1 END,
+                             p.created_at DESC, p.payment_id DESC
+                    LIMIT 1
                     """,
-                    (reservation_id,),  # Solo usa el identificador proporcionado por la ruta administrativa.
+                    (reservation_id, payment_id, payment_id),  # Permite compatibilidad por reserva o seleccionar un pago exacto.
                 ).fetchone()  # Retorna None si no existe una reserva con pago.
                 if row is None:  # Distingue inexistencia antes de realizar escrituras.
                     raise ReservationNotFoundError("No se encontró la reserva con pago solicitado.")  # Permite a la API responder 404.
@@ -661,20 +902,22 @@ class CompraService:
                     raise PaymentTransitionConflictError("El pago ya fue resuelto y no admite otra transición.")  # Evita confirmar pagos fallidos o fallar pagos confirmados.
                 if row[8] != "confirmed":  # La reserva debe seguir activa para poder cerrar el pago.
                     raise PaymentTransitionConflictError("La reserva no está activa para resolver su pago.")  # Evita resolver pagos de reservas canceladas.
+                if target_status == "confirmed" and float(row[12]) + float(row[2]) > float(row[13]) + 1e-9:
+                    raise PaymentTransitionConflictError("El pago superaría el total de la reserva.")
 
                 now = datetime.now(timezone.utc).isoformat()  # Conserva la transición con fecha UTC auditable.
                 updated_payment = connection.execute(  # Cambia el estado solo si sigue pendiente.
                     """
                     UPDATE payments
                     SET status = ?, updated_at = ?
-                    WHERE reservation_id = ? AND status = 'pending'
+                    WHERE payment_id = ? AND status = 'pending'
                     """,
-                    (target_status, now, reservation_id),  # Escribe el resultado validado y su fecha de cambio.
+                    (target_status, now, row[0]),  # Solo cambia el pago pendiente que se seleccionó y validó.
                 ).rowcount  # Cuenta la transición aplicada.
                 if updated_payment != 1:  # Detecta cualquier modificación inesperada del estado.
                     raise PaymentTransitionConflictError("El pago cambió antes de aplicar la transición.")  # No continúa con inventario si no cambió el pago.
 
-                if target_status == "failed":  # Un pago fallido termina la reserva y libera los cupos retenidos.
+                if target_status == "failed" and float(row[12]) <= 0:  # Si no hubo anticipo confirmado, el fallo inicial cancela y libera.
                     cancelled = connection.execute(  # Marca la reserva cancelada como parte de la misma transacción.
                         """
                         UPDATE reservas
@@ -689,9 +932,9 @@ class CompraService:
                         """
                         UPDATE package_inventory
                         SET reserved_capacity = reserved_capacity - ?
-                        WHERE package_code = ? AND reserved_capacity >= ?
+                        WHERE package_code = ? AND travel_date = ? AND reserved_capacity >= ?
                         """,
-                        (row[7], row[6], row[7]),  # Asegura que no se reste más capacidad de la que figura reservada.
+                        (row[7], row[6], row[11], row[7]),  # Libera solo la fecha del viaje y evita inventario negativo.
                     ).rowcount  # Confirma que existe una fila de inventario consistente.
                     if released != 1:  # Trata discrepancias entre recibo e inventario como corrupción recuperable por rollback.
                         raise PurchasePersistenceError("El inventario no coincide con los cupos de la reserva.")  # Revierte pago fallido y cancelación.
@@ -750,15 +993,47 @@ class CompraService:
                 connection.execute(  # Define la capacidad vendible y el contador acumulado por paquete.
                     """
                     CREATE TABLE IF NOT EXISTS package_inventory (
-                        package_code INTEGER PRIMARY KEY,
+                        package_code INTEGER NOT NULL,
+                        travel_date TEXT NOT NULL,
                         total_capacity INTEGER NOT NULL CHECK (total_capacity >= 0),
                         reserved_capacity INTEGER NOT NULL DEFAULT 0
                             CHECK (reserved_capacity >= 0 AND reserved_capacity <= total_capacity),
+                        PRIMARY KEY (package_code, travel_date),
                         FOREIGN KEY (package_code) REFERENCES paquetes (codigo)
                             ON DELETE CASCADE
                     )
                     """
-                )  # La restricción de fila impide capacidad negativa o más reservados que el total.
+                )  # La clave compuesta mantiene capacidad separada por paquete y fecha.
+                inventory_columns = {
+                    column[1]
+                    for column in connection.execute("PRAGMA table_info(package_inventory)").fetchall()
+                }
+                if "travel_date" not in inventory_columns:
+                    connection.execute("ALTER TABLE package_inventory RENAME TO package_inventory_legacy")
+                    connection.execute(
+                        """
+                        CREATE TABLE package_inventory (
+                            package_code INTEGER NOT NULL,
+                            travel_date TEXT NOT NULL,
+                            total_capacity INTEGER NOT NULL CHECK (total_capacity >= 0),
+                            reserved_capacity INTEGER NOT NULL DEFAULT 0
+                                CHECK (reserved_capacity >= 0 AND reserved_capacity <= total_capacity),
+                            PRIMARY KEY (package_code, travel_date),
+                            FOREIGN KEY (package_code) REFERENCES paquetes (codigo)
+                                ON DELETE CASCADE
+                        )
+                        """
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO package_inventory (
+                            package_code, travel_date, total_capacity, reserved_capacity
+                        )
+                        SELECT package_code, 'legacy', total_capacity, reserved_capacity
+                        FROM package_inventory_legacy
+                        """
+                    )
+                    connection.execute("DROP TABLE package_inventory_legacy")
                 connection.execute(  # Define el recibo persistido para cada compra confirmada.
                     """
                     CREATE TABLE IF NOT EXISTS reservas (
@@ -768,6 +1043,8 @@ class CompraService:
                         quantity INTEGER NOT NULL CHECK (quantity > 0),
                         unit_price REAL NOT NULL CHECK (unit_price > 0),
                         total_price REAL NOT NULL CHECK (total_price > 0),
+                        travel_date TEXT NOT NULL DEFAULT 'legacy',
+                        exchange_rate_applied REAL,
                         created_at TEXT NOT NULL,
                         idempotency_key TEXT,
                         request_hash TEXT,
@@ -790,6 +1067,10 @@ class CompraService:
                     connection.execute("ALTER TABLE reservas ADD COLUMN status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status IN ('confirmed', 'cancelled'))")  # Marca todas las reservas históricas como activas.
                 if "cancelled_at" not in existing_columns:  # Detecta la ausencia de fecha de cancelación en el esquema legado.
                     connection.execute("ALTER TABLE reservas ADD COLUMN cancelled_at TEXT")  # Agrega campo nullable sin borrar filas existentes.
+                if "travel_date" not in existing_columns:
+                    connection.execute("ALTER TABLE reservas ADD COLUMN travel_date TEXT NOT NULL DEFAULT 'legacy'")
+                if "exchange_rate_applied" not in existing_columns:
+                    connection.execute("ALTER TABLE reservas ADD COLUMN exchange_rate_applied REAL")
                 connection.execute(  # Crea el índice único que respalda la idempotencia dentro de reservas.
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS uq_reservas_rut_idempotency
@@ -801,7 +1082,7 @@ class CompraService:
                     """
                     CREATE TABLE IF NOT EXISTS payments (
                         payment_id TEXT PRIMARY KEY,
-                        reservation_id TEXT NOT NULL UNIQUE,
+                        reservation_id TEXT NOT NULL,
                         amount REAL NOT NULL CHECK (amount > 0),
                         status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'failed')),
                         created_at TEXT NOT NULL,
@@ -812,7 +1093,7 @@ class CompraService:
                             ON DELETE CASCADE
                     )
                     """
-                )  # Cada reserva posee como máximo un pago local con estados controlados.
+                )  # Cada fila representa un pago independiente asociado a una reserva.
                 payment_columns = {  # Inspecciona columnas para actualizar pagos creados por versiones anteriores.
                     column[1]
                     for column in connection.execute("PRAGMA table_info(payments)").fetchall()
@@ -821,24 +1102,73 @@ class CompraService:
                     connection.execute("ALTER TABLE payments ADD COLUMN expires_at TEXT")  # Agrega el plazo sin eliminar estados de pago.
                 if "expired_at" not in payment_columns:  # Detecta la ausencia del instante en que el worker procesa la expiración.
                     connection.execute("ALTER TABLE payments ADD COLUMN expired_at TEXT")  # Diferencia pagos vencidos de pagos fallidos manualmente.
-                pending_without_deadline = connection.execute(  # Selecciona filas viejas que necesitan calcular fecha límite.
+                pending_without_deadline = connection.execute(
                     "SELECT payment_id, status, created_at FROM payments WHERE expires_at IS NULL"
-                ).fetchall()  # Resuelve pendientes con su hora de creación original.
-                for payment_id, payment_status, payment_created_at in pending_without_deadline:  # Migra cada pago sin deadline de forma explícita.
-                    created_datetime = datetime.fromisoformat(str(payment_created_at))  # Interpreta el timestamp UTC persistido por versiones previas.
-                    if created_datetime.tzinfo is None:  # Rechaza datos históricos ambiguos en vez de asumir su zona horaria.
-                        raise ValueError(f"El pago {payment_id} tiene una fecha de creación sin zona horaria.")  # Detiene la migración si no se puede calcular con seguridad.
-                    deadline = (created_datetime + timedelta(seconds=PAYMENT_PENDING_TTL_SECONDS)).isoformat() if payment_status == "pending" else str(payment_created_at)  # Da a pendientes el TTL y evita expirar pagos ya resueltos.
-                    connection.execute(  # Guarda la fecha límite calculada sin alterar estado ni monto.
+                ).fetchall()
+                for payment_id, payment_status, payment_created_at in pending_without_deadline:
+                    created_datetime = datetime.fromisoformat(str(payment_created_at))
+                    if created_datetime.tzinfo is None:
+                        raise ValueError(f"El pago {payment_id} tiene una fecha de creación sin zona horaria.")
+                    deadline = (
+                        created_datetime + timedelta(seconds=PAYMENT_PENDING_TTL_SECONDS)
+                    ).isoformat() if payment_status == "pending" else str(payment_created_at)
+                    connection.execute(
                         "UPDATE payments SET expires_at = ? WHERE payment_id = ?",
-                        (deadline, payment_id),  # Usa parámetros para el identificador y la fecha.
-                    )  # Los pagos pendientes antiguos se podrán expirar en el barrido inicial.
+                        (deadline, payment_id),
+                    )
+                unique_reservation_index = False
+                for index in connection.execute("PRAGMA index_list(payments)").fetchall():
+                    if index[2]:
+                        indexed_columns = [
+                            column[2]
+                            for column in connection.execute(f"PRAGMA index_info('{index[1]}')").fetchall()
+                        ]
+                        if indexed_columns == ["reservation_id"]:
+                            unique_reservation_index = True
+                            break
+                if unique_reservation_index:
+                    connection.execute("ALTER TABLE payments RENAME TO payments_legacy_unique")
+                    connection.execute(
+                        """
+                        CREATE TABLE payments (
+                            payment_id TEXT PRIMARY KEY,
+                            reservation_id TEXT NOT NULL,
+                            amount REAL NOT NULL CHECK (amount > 0),
+                            status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'failed')),
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            expires_at TEXT NOT NULL,
+                            expired_at TEXT,
+                            FOREIGN KEY (reservation_id) REFERENCES reservas (reservation_id)
+                                ON DELETE CASCADE
+                        )
+                        """
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO payments (
+                            payment_id, reservation_id, amount, status,
+                            created_at, updated_at, expires_at, expired_at
+                        )
+                        SELECT payment_id, reservation_id, amount, status,
+                               created_at, updated_at, expires_at, expired_at
+                        FROM payments_legacy_unique
+                        """
+                    )
+                    connection.execute("DROP TABLE payments_legacy_unique")
                 connection.execute(  # Acelera la búsqueda periódica de pagos aún no resueltos.
                     """
                     CREATE INDEX IF NOT EXISTS idx_payments_pending_expiry
                     ON payments (status, expires_at)
                     """
                 )  # Optimiza por estado y fecha de expiración.
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_one_pending_per_reservation
+                    ON payments (reservation_id)
+                    WHERE status = 'pending' AND expired_at IS NULL
+                    """
+                )
                 connection.execute(  # Migra reservas anteriores como pagos históricos ya resueltos y no retiene inventario adicional.
                     """
                     INSERT INTO payments (

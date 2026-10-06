@@ -3,6 +3,7 @@
 import sqlite3  # Inspecciona los registros conservados después de una baja lógica.
 import tempfile  # Mantiene los cambios de cada prueba fuera de la base local real.
 import unittest  # Ejecuta escenarios integrados con la biblioteca estándar.
+from datetime import date  # Da a la configuración de inventario y reservas un día explícito.
 from contextlib import closing  # Cierra conexiones SQLite de fixtures y verificaciones.
 from pathlib import Path  # Construye rutas independientes del directorio actual.
 
@@ -11,6 +12,8 @@ from fastapi.testclient import TestClient  # Invoca la API ASGI sin abrir puerto
 from dao.paquete_dao import PaqueteDao  # Verifica migración aditiva del esquema de paquetes.
 from main_api import create_app  # Construye los endpoints y servicios reales sobre una base temporal.
 from services.auth_service import UserRole  # Aprovisiona identidades de cliente y administrador.
+
+TRAVEL_DATE_JSON = date(2026, 12, 15).isoformat()
 
 
 class PackageAdminApiTests(unittest.TestCase):
@@ -160,13 +163,13 @@ class PackageAdminApiTests(unittest.TestCase):
         inventory = self.client.put(  # Configura cupos antes de realizar la reserva.
             "/admin/paquetes/306/inventario",  # Usa el endpoint de inventario preexistente.
             headers=self._admin_headers(),  # Configura cupos como administrador.
-            json={"total_capacity": 2},  # Deja inventario suficiente para una reserva.
+            json={"total_capacity": 2, "travel_date": TRAVEL_DATE_JSON},  # Deja inventario suficiente para esa fecha.
         )  # Persiste la capacidad.
         self.assertEqual(inventory.status_code, 200)  # Confirma que el paquete está disponible para venta.
         reservation = self.client.post(  # Crea una reserva que debe sobrevivir a la baja del producto.
             "/reservas",  # Usa la ruta de compra transaccional.
             headers=self._client_headers(),  # Vincula la compra al RUT del cliente autenticado.
-            json={"package_code": 306, "quantity": 1},  # Retiene un cupo y crea historial de pago/reserva.
+            json={"package_code": 306, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Retiene cupo fechado y crea historial.
         )  # Completa la transacción de compra.
         self.assertEqual(reservation.status_code, 201)  # Confirma la reserva previa a la baja.
 
@@ -185,12 +188,12 @@ class PackageAdminApiTests(unittest.TestCase):
         blocked_purchase = self.client.post(  # Comprueba que la baja no permite ventas nuevas.
             "/reservas",  # Ejecuta el mismo flujo normal de compra.
             headers=self._client_headers(),  # Presenta credenciales válidas del cliente.
-            json={"package_code": 306, "quantity": 1},  # Intenta comprar el paquete ya inactivo.
+            json={"package_code": 306, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Intenta comprar el paquete ya inactivo.
         )  # El servicio transaccional debe tratarlo como no disponible.
         blocked_inventory = self.client.put(  # Comprueba que no se puede volver a publicar inventario por esa vía.
             "/admin/paquetes/306/inventario",  # Solicita modificar capacidad del paquete inactivo.
             headers=self._admin_headers(),  # Usa rol autorizado para aislar el estado del recurso.
-            json={"total_capacity": 3},  # Capacidad válida en sí misma.
+            json={"total_capacity": 3, "travel_date": TRAVEL_DATE_JSON},  # Capacidad válida para la fecha pedida.
         )  # El servicio rechaza configurar nuevos cupos.
         self.assertEqual(blocked_purchase.status_code, 404)  # Un paquete oculto se considera ausente en la compra pública.
         self.assertEqual(blocked_inventory.status_code, 404)  # Un producto dado de baja no admite nuevas operaciones de inventario.

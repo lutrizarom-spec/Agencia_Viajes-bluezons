@@ -131,8 +131,8 @@ catálogo público y conserva sus reservas y pagos relacionados.
 | Método y ruta | Acceso | Uso |
 |---|---|---|
 | `POST /auth/login` | Público, limitado por RUT | Autentica con `rut` y `password`; retorna JWT Bearer. |
-| `GET /paquetes` | Público | Lista paquetes, precios calculados por los modelos actuales y cupos conocidos. |
-| `POST /reservas` | JWT requerido | Compra `package_code` y `quantity`; asocia el RUT autenticado. |
+| `GET /paquetes?travel_date=YYYY-MM-DD` | Público | Lista paquetes y disponibilidad para esa fecha; sin fecha, informa cupos agregados. |
+| `POST /reservas` | JWT requerido | Compra `package_code`, `quantity` y `travel_date`; asocia el RUT autenticado. |
 | `GET /reservas` | JWT requerido | Lista únicamente las reservas asociadas al RUT del token. |
 | `POST /reservas/{reservation_id}/cancelar` | JWT requerido | Cancela una reserva propia; un administrador puede cancelar cualquier reserva. |
 | `GET /admin/reservas` | JWT de administrador | Lista el historial de reservas de todos los clientes. |
@@ -141,18 +141,24 @@ catálogo público y conserva sus reservas y pagos relacionados.
 | `PUT /admin/paquetes/{package_code}` | JWT de administrador | Edita un paquete activo sin cambiar su código. |
 | `DELETE /admin/paquetes/{package_code}` | JWT de administrador | Lo oculta mediante baja lógica; una repetición es segura e idempotente. |
 | `GET /reservas/{reservation_id}/pago` | JWT requerido | Consulta el estado del pago propio; administración puede consultar cualquier pago. |
+| `GET /reservas/{reservation_id}/pagos` | JWT requerido | Lista el anticipo y todos los abonos/intentos de pago de una reserva propia. |
+| `POST /reservas/{reservation_id}/pagos` | JWT requerido | Crea un abono adicional dentro del saldo pendiente. |
 | `POST /admin/reservas/{reservation_id}/pago` | JWT de administrador | Simula el resultado local `confirmed` o `failed`; no cobra dinero. |
 | `GET /tipo-cambio` | Público | Retorna USD/CLP del proveedor FX o su caché SQLite. |
-| `PUT /admin/paquetes/{package_code}/inventario` | JWT de administrador | Configura capacidad local de un paquete. |
+| `PUT /admin/paquetes/{package_code}/inventario` | JWT de administrador | Configura capacidad local de un paquete y `travel_date`. |
 
 `services.compra_service.CompraService` registra inventario y reservas en
-`package_inventory` y `reservas`. Ejecuta la compra bajo `BEGIN IMMEDIATE` y
-confirma descuento de cupos más recibo en una única transacción SQLite. El
-catálogo existente no define inventario de fábrica: un administrador debe
-configurar cupos antes de aceptar compras. Este flujo local no integra una
-pasarela de pago, retenciones externas de inventario ni emisión de boletas. El
-registro local de pagos solo permite ensayar estados y no procesa tarjetas,
-transferencias ni cobros reales.
+`package_inventory`, `reservas` y `payments`. El inventario se identifica por
+paquete y fecha de viaje, y la compra descuenta cupos de esa fecha bajo
+`BEGIN IMMEDIATE` junto con el recibo y su pago inicial, en una única
+transacción SQLite. El catálogo no define inventario de fábrica: un
+administrador debe configurar cupos para cada fecha antes de aceptar compras.
+Las reservas internacionales y cruceros consultan `FxService` al crearse y
+persisten en la reserva la tasa USD/CLP aplicada y el precio resultante; así los
+reintentos y pagos posteriores no recalculan el precio con otra cotización.
+Este flujo local no integra una pasarela de pago, retenciones externas de
+inventario ni emisión de boletas. Los registros locales solo permiten ensayar
+estados y no procesan tarjetas, transferencias ni cobros reales.
 
 Las reservas nuevas quedan en estado `confirmed`. La cancelación cambia el
 estado a `cancelled`, registra `cancelled_at` y devuelve los cupos en la misma
@@ -162,46 +168,51 @@ libera inventario una segunda vez. Los clientes solo pueden listar o cancelar
 sus propias reservas; el rol administrador puede consultar `/admin/reservas`
 y cancelar cualquier reserva. Al iniciar, `CompraService` añade las columnas
 de estado a bases SQLite existentes y marca sus reservas anteriores como
-confirmadas, sin eliminar registros.
+confirmadas, sin eliminar registros. En la migración, el inventario antiguo y
+las reservas históricas se conservan con fecha `legacy`; el administrador debe
+configurar capacidad para fechas concretas antes de vender nuevas salidas.
 
-### Simulación local del estado de pago
+### Simulación local del estado de pago y abonos
 
 Al crear una reserva, el backend retiene los cupos y crea en la misma
-transacción un registro de pago con estado `pending`, el monto congelado del
-recibo y un plazo de quince minutos (`expires_at`). La respuesta de reserva
-incluye `payment_expires_at`. El cliente puede consultar su estado con
-`GET /reservas/{reservation_id}/pago`. Un administrador simula la respuesta de
-un proveedor con `POST /admin/reservas/{reservation_id}/pago` y uno de estos
-cuerpos:
+transacción un pago inicial pendiente equivalente al 50 % del total, con un
+plazo de quince minutos (`expires_at`). La respuesta incluye el identificador
+del pago y `payment_expires_at`. El cliente consulta el último intento con
+`GET /reservas/{reservation_id}/pago` y el historial completo con
+`GET /reservas/{reservation_id}/pagos`. Un administrador simula el resultado
+de un intento específico mediante `POST /admin/reservas/{reservation_id}/pago`:
 
 ```json
-{"status": "confirmed"}
+{"payment_id": "uuid-del-pago", "status": "confirmed"}
 ```
+
+La transición de cada intento es `pending` a `confirmed` o `failed`; no se
+puede revertir un resultado terminal. Tras confirmar el anticipo, el titular
+puede crear abonos con `POST /reservas/{reservation_id}/pagos`:
 
 ```json
-{"status": "failed"}
+{"amount": 10000}
 ```
 
-La transición permitida es `pending` a `confirmed` o `failed`; los resultados
-terminales no se pueden revertir. Confirmar conserva la reserva y sus cupos.
-Marcar fallido cancela la reserva y devuelve su capacidad en una única
-transacción. Repetir el mismo resultado terminal es idempotente; intentar el
-resultado opuesto devuelve `409 Conflict`. La simulación está restringida a
-administradores para no permitir que un cliente declare pagado su propio
-pedido. Cancelar una reserva con pago pendiente marca también el pago como
-fallido; cancelar una ya confirmada no realiza reembolsos. Las reservas previas
-a esta función reciben un registro de pago histórico confirmado (o fallido si
-la reserva ya estaba cancelada), sin afectar de nuevo su inventario.
+Cada abono debe ser positivo y no superar el saldo restante; solo se permite un
+intento pendiente a la vez. Los abonos confirmados se acumulan hasta completar
+el total. Si falla o vence el pago inicial antes de cualquier abono confirmado,
+la reserva se cancela y se liberan los cupos. Si un intento posterior falla o
+vence, solo se cierra ese intento: la reserva y los cupos se conservan para
+permitir otro abono. Repetir el mismo resultado terminal es idempotente;
+intentar el resultado opuesto devuelve `409 Conflict`. Solo administración
+puede simular resultados. Cancelar una reserva no realiza reembolsos. Las
+reservas previas a esta función reciben un pago histórico confirmado (o fallido
+si la reserva ya estaba cancelada), sin afectar de nuevo su inventario.
 
 FastAPI realiza un barrido al iniciar y luego cada 30 segundos mientras el
-servidor esté activo. Si vence un pago pendiente, queda identificado como
-`expired`, su reserva se cancela y los cupos se liberan atómicamente. La demora
-máxima después del plazo es, por tanto, aproximadamente un intervalo de
-barrido; al reiniciar la aplicación se procesan inmediatamente vencimientos
-ocurridos mientras estaba detenida. Si el worker no puede completar el ciclo,
-el error queda registrado y visible en el log del servidor; las transiciones
-manuales también ejecutan primero un barrido y no pueden confirmar un pago
-fuera de plazo.
+servidor esté activo. Si vence el pago inicial sin pagos confirmados, la reserva
+se cancela y sus cupos se liberan atómicamente; el vencimiento de un abono
+posterior conserva la reserva. La demora máxima después del plazo es
+aproximadamente un intervalo de barrido; al reiniciar se procesan
+inmediatamente los vencimientos ocurridos mientras estaba detenida. Los
+errores del worker quedan registrados y las transiciones manuales también
+ejecutan primero un barrido para impedir confirmar un pago vencido.
 
 ### Reintentos e idempotencia de reservas
 
@@ -216,7 +227,7 @@ Authorization: Bearer <token>
 X-Idempotency-Key: checkout-2026-000123
 Content-Type: application/json
 
-{"package_code": 101, "quantity": 2}
+{"package_code": 101, "quantity": 2, "travel_date": "2026-12-15"}
 ```
 
 La creación de reserva responde `201` con pago `pending`; un reenvío con el

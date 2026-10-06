@@ -5,7 +5,6 @@ import unittest  # Ejecuta los casos de modelo sin base de datos ni dependencias
 
 from model.paquete_crucero import Paquete_Crucero  # Comprueba atributos e importe específico del crucero.
 from model.paquete_internacional import Paquete_Internacional  # Comprueba el estado booleano del pasaporte.
-from model.paquete_nacional import Paquete_Nacional  # Comprueba que se conserven valores y fórmula nacional.
 from model.paquete_turistico import Paquete_Turistico  # Comprueba las reglas compartidas por todos los paquetes.
 
 
@@ -63,6 +62,16 @@ class PackageModelInvariantTests(unittest.TestCase):
         with self.assertRaises(ValueError):  # El setter conserva su validación para actualizaciones posteriores.
             package.pasaporte_valido = 0  # Rechaza el entero cero aunque tenga significado de falso en una condición.
         self.assertEqual(package.calcular_precio(), 90000.0)  # Confirma que validar el pasaporte no cambia la fórmula internacional.
+        self.assertEqual(package.calcular_precio(987.65), 98765.0)  # Permite calcular con la cotización congelada por la compra.
+        for invalid_rate in (0, -1, math.nan, math.inf, True, "900"):  # No acepta tasas nulas, negativas, no finitas ni tipos incorrectos.
+            with self.subTest(rate=invalid_rate):
+                with self.assertRaises(ValueError):
+                    getattr(package, "calcular_precio")(invalid_rate)
+
+    def test_cruise_uses_supplied_exchange_rate_and_keeps_port_tax(self) -> None:
+        """La cotización recibida reemplaza el multiplicador fijo durante una reserva."""
+        cruise = Paquete_Crucero(1, "Crucero", 3, 100.0, 12500.0)
+        self.assertEqual(cruise.calcular_precio(987.65), 111265.0)
 
 
 if __name__ == "__main__":  # Permite ejecutar esta suite directamente durante desarrollo local.

@@ -1,55 +1,55 @@
 classDiagram
-direction LR
+direction TB
 
 class Paquete_Turistico {
-  -int __codigo
-  -str __nombre
-  -int __duracion
-  -float __precio_base
-  +int codigo
-  +str nombre
-  +int duracion
-  +float precio_base
-  +Paquete_Turistico(codigo: int, nombre: str, duracion: int, precio_base: float)
-  #_validar_monto(monto: float, etiqueta: str, permitir_cero: bool): None
-  +calcular_precio(): float
-  +obtener_detalle(): str
+    -__codigo: int
+    -__nombre: str
+    -__duracion: int
+    -__precio_base: float
+    +__init__(codigo: int, nombre: str, duracion: int, precio_base: float)
+    #_validar_monto(monto: float, etiqueta: str, permitir_cero: bool): None
+    +codigo: int
+    +nombre: str
+    +duracion: int
+    +precio_base: float
+    +calcular_precio(tasa_cambio: float = None): float
+    +obtener_detalle(): str
 }
 
 class Paquete_Nacional {
-  +Paquete_Nacional(codigo: int, nombre: str, duracion: int, precio_base: float)
-  +calcular_precio(): float
+    +__init__(codigo: int, nombre: str, duracion: int, precio_base: float)
+    +calcular_precio(tasa_cambio: float = None): float
 }
 
 class Paquete_Internacional {
-  -bool __pasaporte_valido
-  +bool pasaporte_valido
-  +Paquete_Internacional(codigo: int, nombre: str, duracion: int, precio_base: float, pasaporte_valido: bool)
-  +calcular_precio(): float
+    -__pasaporte_valido: bool
+    +__init__(codigo: int, nombre: str, duracion: int, precio_base: float, pasaporte_valido: bool)
+    +pasaporte_valido: bool
+    +calcular_precio(tasa_cambio: float = None): float
 }
 
 class Paquete_Crucero {
-  -float __impuesto_puerto
-  +float impuesto_puerto
-  +Paquete_Crucero(codigo: int, nombre: str, duracion: int, precio_base: float, impuesto_puerto: float)
-  +calcular_precio(): float
+    -__impuesto_puerto: float
+    +__init__(codigo: int, nombre: str, duracion: int, precio_base: float, impuesto_puerto: float)
+    +impuesto_puerto: float
+    +calcular_precio(tasa_cambio: float = None): float
 }
 
 class Dao {
-  +sqlite3.Connection conexion
-  +sqlite3.Cursor cursor
-  +Dao(conexion: sqlite3.Connection)
+    +conexion: sqlite3.Connection
+    +cursor: sqlite3.Cursor
+    +__init__(conexion: sqlite3.Connection): None
 }
 
 class PaqueteDao {
-  +crear_tabla(): None
-  +insertar_paquete(paquete: Paquete_Turistico): None
-  +actualizar_paquete(paquete: Paquete_Turistico, codigo: int): int
-  +obtener_paquetes(incluir_inactivos: bool = False): list[tuple]
-  +obtener_paquetes_admin(): list[tuple]
-  +obtener_paquete(codigo: int, incluir_inactivo: bool = False): tuple | None
-  +eliminar_paquete(codigo: int): int
-  #_specific_fields(paquete: Paquete_Turistico): tuple
+    +crear_tabla(): None
+    +insertar_paquete(paquete: Paquete_Turistico): None
+    +actualizar_paquete(paquete: Paquete_Turistico, codigo: int): int
+    +obtener_paquetes(incluir_inactivos: bool = False): list[tuple]
+    +obtener_paquetes_admin(): list[tuple]
+    +obtener_paquete(codigo: int, incluir_inactivo: bool = False): tuple | None
+    +eliminar_paquete(codigo: int): int
+    #_specific_fields(paquete: Paquete_Turistico): tuple[str, int | None, float | None]
 }
 
 Paquete_Turistico <|-- Paquete_Nacional
@@ -57,11 +57,8 @@ Paquete_Turistico <|-- Paquete_Internacional
 Paquete_Turistico <|-- Paquete_Crucero
 Dao <|-- PaqueteDao
 PaqueteDao ..> Paquete_Turistico : persiste
-PaqueteDao ..> Paquete_Nacional : identifica subtipo
-PaqueteDao ..> Paquete_Internacional : persiste pasaporte
-PaqueteDao ..> Paquete_Crucero : persiste impuesto
 
-note for Paquete_Internacional "calcular_precio() retorna precio_base * 900. El 900 esta fijo en el metodo: no es un atributo ni una tasa por fecha. pasaporte_valido es una propiedad que valida que el valor sea bool."
-note for Paquete_Crucero "calcular_precio() retorna (precio_base * 900) + impuesto_puerto."
-note for Paquete_Turistico "Es concreta en el codigo: se instancia para paquetes genericos. Sus propiedades codigo, nombre, duracion y precio_base son de solo lectura. _validar_monto() es estatico."
-note for PaqueteDao "_specific_fields() es estatico; convierte los datos especificos de cada subtipo en columnas persistibles."
+note for Paquete_Internacional "calcular_precio(tasa_cambio=None) conserva 900 como valor historico; CompraService entrega la tasa FX actual al crear la reserva."
+note for Paquete_Crucero "calcular_precio(tasa_cambio=None) usa la tasa recibida o el valor historico 900, y suma impuesto_puerto."
+note for Paquete_Turistico "Clase concreta en Python. Sus propiedades comunes son de solo lectura; _validar_monto() es estatico."
+note for PaqueteDao "_specific_fields() serializa el subtipo y sus campos propios para la persistencia."
