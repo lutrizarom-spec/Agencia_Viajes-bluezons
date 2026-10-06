@@ -1,11 +1,11 @@
 # Agencia de Viajes - Sistema de Gestión (POO & DAO)
 
-Demostración automática de paquetes turísticos y compras locales. El proyecto organiza las responsabilidades siguiendo un enfoque MVC/DAO: los modelos representan el dominio, `main.py` ejecuta ejemplos reproducibles sin solicitar entrada, y la capa DAO concentra el acceso a SQLite. La demostración usa una base temporal y no modifica `agencia.db`.
+Demostración automática del modelo de clases de una agencia de viajes. `main.py` usa únicamente la biblioteca estándar y los modelos del proyecto; no depende de la API, DAO, SQLite ni servicios externos. Las capas de API y persistencia siguen disponibles por separado.
 
 ## Arquitectura
 
-- **Modelo:** `Paquete_Turistico` contiene los datos comunes y los modelos `Paquete_Nacional`, `Paquete_Internacional` y `Paquete_Crucero` especializan su comportamiento. `Reserva` crea sus propios `DetalleReserva` y conserva una referencia al `Paquete_Turistico` existente. El diagrama editable en Mermaid está en `model/diagrama_paquetes.mmd`.
-- **Vista y flujo de demostración:** `main.py` crea e imprime los tres subtipos, prueba la validación del pasaporte, crea una reserva con su pago y presenta dos excepciones de negocio controladas.
+- **Modelo:** `Paquete_Turistico` contiene los datos comunes y los subtipos especializan su cálculo. `Cliente` hereda los datos comunes de `Persona`. `Reserva` recibe objetos `Cliente` y `Paquete_Turistico` existentes y crea sus `Detalle_Reserva`; `Pago` crea su `Boleta`. El diagrama editable en Mermaid está en `diagrama_agencia_completo.mmd`.
+- **Demostración:** `main.py` imprime los tres precios polimórficos, prueba una validación de setter, presenta una reserva con sus detalles y controla los errores de pasaporte y anticipo.
 - **API REST local:** `main_api.py` expone catálogo público, login JWT, consulta FX y rutas protegidas de reserva e inventario.
 - **Persistencia:** `Dao` comparte la conexión y el cursor; `PaqueteDao` implementa las operaciones de almacenamiento para paquetes.
 - **Base de datos:** `conectar.py` abre la base SQLite y activa `PRAGMA foreign_keys = ON` en la conexión.
@@ -17,7 +17,8 @@ Demostración automática de paquetes turísticos y compras locales. El proyecto
 - Consultar el listado con detalles y precio calculado según el tipo de paquete.
 - Dar de baja paquetes sin borrar reservas, pagos ni historial.
 - Encapsular atributos del dominio mediante propiedades y atributos privados.
-- Representar composición Reserva–DetalleReserva y agregación Reserva–Paquete_Turistico.
+- Representar composición `Reserva`–`Detalle_Reserva` y `Pago`–`Boleta`, además de las asociaciones de `Reserva` con `Cliente` y `Paquete_Turistico`.
+- Exigir pasaporte registrado para reservar paquetes internacionales y un anticipo mínimo del 50 %.
 - Validar invariantes de paquetes al construirlos: código y duración positivos,
   nombre no vacío, precio finito y positivo, impuesto portuario finito y no
   negativo, y pasaporte estrictamente booleano.

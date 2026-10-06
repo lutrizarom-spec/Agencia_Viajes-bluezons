@@ -1,89 +1,92 @@
 classDiagram
 direction TB
 
+class Persona {
+    -__rut: str
+    -__nombre: str
+    -__telefono_movil: str
+    +validar_datos(): bool
+}
+
+class Cliente {
+    -__id_cliente: int
+    -__pasaporte: str
+    -__correo: str
+    +validar_pasaporte(): bool
+}
+
 class Paquete_Turistico {
     -__codigo: int
     -__nombre: str
     -__duracion: int
     -__precio_base: float
-    +__init__(codigo: int, nombre: str, duracion: int, precio_base: float)
-    #_validar_monto(monto: float, etiqueta: str, permitir_cero: bool): None
-    +codigo: int
-    +nombre: str
-    +duracion: int
-    +precio_base: float
     +calcular_precio(tasa_cambio: float = None): float
     +obtener_detalle(): str
 }
 
 class Paquete_Nacional {
-    +__init__(codigo: int, nombre: str, duracion: int, precio_base: float)
     +calcular_precio(tasa_cambio: float = None): float
 }
 
 class Paquete_Internacional {
     -__pasaporte_valido: bool
-    +__init__(codigo: int, nombre: str, duracion: int, precio_base: float, pasaporte_valido: bool)
-    +pasaporte_valido: bool
     +calcular_precio(tasa_cambio: float = None): float
 }
 
 class Paquete_Crucero {
     -__impuesto_puerto: float
-    +__init__(codigo: int, nombre: str, duracion: int, precio_base: float, impuesto_puerto: float)
-    +impuesto_puerto: float
     +calcular_precio(tasa_cambio: float = None): float
 }
 
 class Reserva {
-    -__rut_cliente: str
+    -__numero_reserva: str
+    -__fecha_reserva: date
+    -__fecha_viaje: date
+    -__estado: str
+    -__tasa_cambio_aplicada: float
+    -__cliente: Cliente
     -__paquete: Paquete_Turistico
-    -__detalles: list[DetalleReserva]
-    +__init__(rut_cliente: str, paquete: Paquete_Turistico, cantidad: int)
-    +paquete: Paquete_Turistico
-    +detalles: tuple[DetalleReserva, ...]
-    +total: float
-    +agregar_detalle(paquete: Paquete_Turistico, cantidad: int): None
+    -__detalles: list[Detalle_Reserva]
+    +agregar_detalle(cantidad: int): Detalle_Reserva
+    +validar_anticipo(monto_anticipo: float): bool
+    +calcular_total(): float
+    +confirmar(): bool
+    +cancelar(): bool
 }
 
-class DetalleReserva {
+class Detalle_Reserva {
+    -__id_detalle: int
     -__paquete: Paquete_Turistico
+    -__tasa_cambio: float
     -__cantidad: int
-    -__precio_unitario: float
     -__subtotal: float
-    +__init__(paquete: Paquete_Turistico, cantidad: int)
-    +paquete: Paquete_Turistico
-    +cantidad: int
-    +precio_unitario: float
-    +subtotal: float
+    +calcular_subtotal(): float
 }
 
-class Dao {
-    +conexion: sqlite3.Connection
-    +cursor: sqlite3.Cursor
-    +__init__(conexion: sqlite3.Connection): None
+class Pago {
+    -__id_pago: str
+    -__fecha: date
+    -__monto: float
+    -__estado: str
+    -__fecha_vencimiento: date
+    -__reserva: Reserva
+    -__boleta: Boleta
+    +procesar_pago(): None
 }
 
-class PaqueteDao {
-    +crear_tabla(): None
-    +insertar_paquete(paquete: Paquete_Turistico): None
-    +actualizar_paquete(paquete: Paquete_Turistico, codigo: int): int
-    +obtener_paquetes(incluir_inactivos: bool = False): list[tuple]
-    +obtener_paquetes_admin(): list[tuple]
-    +obtener_paquete(codigo: int, incluir_inactivo: bool = False): tuple | None
-    +eliminar_paquete(codigo: int): int
-    #_specific_fields(paquete: Paquete_Turistico): tuple[str, int | None, float | None]
+class Boleta {
+    -__num_boleta: int
+    -__fecha: date
+    -__monto: float
+    -__emitida: bool
+    +emitir(): None
 }
 
+Persona <|-- Cliente
 Paquete_Turistico <|-- Paquete_Nacional
 Paquete_Turistico <|-- Paquete_Internacional
 Paquete_Turistico <|-- Paquete_Crucero
-Reserva *-- "1..*" DetalleReserva : composición
-Reserva o-- "1" Paquete_Turistico : agregación
-Dao <|-- PaqueteDao
-PaqueteDao ..> Paquete_Turistico : persiste
-
-note for Paquete_Internacional "calcular_precio(tasa_cambio=None) conserva 900 como valor historico; CompraService entrega la tasa FX actual al crear la reserva."
-note for Paquete_Crucero "calcular_precio(tasa_cambio=None) usa la tasa recibida o el valor historico 900, y suma impuesto_puerto."
-note for Paquete_Turistico "Clase concreta en Python. Sus propiedades comunes son de solo lectura; _validar_monto() es estatico."
-note for PaqueteDao "_specific_fields() serializa el subtipo y sus campos propios para la persistencia."
+Cliente "1" o-- "0..*" Reserva : cliente existente
+Reserva "0..*" o-- "1" Paquete_Turistico : paquete existente
+Reserva "1" *-- "0..*" Detalle_Reserva : compone
+Pago "1" *-- "1" Boleta : compone

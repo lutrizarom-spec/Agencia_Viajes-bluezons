@@ -38,8 +38,10 @@ class PackageModelInvariantTests(unittest.TestCase):
         self.assertEqual(package.duracion, 5)  # Conserva la duración positiva.
         self.assertEqual(package.precio_base, 125000)  # Preserva el valor numérico original sin forzar una conversión.
         self.assertEqual(package.calcular_precio(), 125000)  # Mantiene sin cambios la fórmula de la clase base.
-        with self.assertRaises(AttributeError):  # Las propiedades comunes continúan sin setter público.
-            package.nombre = "Otro viaje"  # El usuario no debe modificar el estado encapsulado por asignación pública.
+        package.nombre = "  Otro viaje  "  # El setter conserva la encapsulación y normaliza el nuevo valor.
+        self.assertEqual(package.nombre, "Otro viaje")  # Comprueba que la asignación válida pasa por la propiedad.
+        with self.assertRaises(ValueError):  # El setter rechaza un nombre que viola la regla del dominio.
+            package.nombre = "   "  # Un nombre vacío no puede reemplazar el valor válido.
 
     def test_cruise_tax_must_be_finite_and_non_negative(self) -> None:
         """El impuesto del crucero admite cero, pero rechaza negativos y no finitos."""
