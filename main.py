@@ -8,6 +8,7 @@ from pathlib import Path
 
 from dao.paquete_dao import PaqueteDao
 from model.paquete_crucero import Paquete_Crucero
+from model.reserva import Reserva
 from model.paquete_internacional import Paquete_Internacional
 from model.paquete_nacional import Paquete_Nacional
 from model.paquete_turistico import Paquete_Turistico
@@ -40,6 +41,17 @@ def main() -> None:
 
     fecha_viaje = date(2026, 12, 15)
     rut_cliente = "10.000.013-K"
+    reserva_modelo = Reserva(rut_cliente, paquetes[0], 2)
+    print("\n=== Composición y agregación: reserva ===")
+    print(f"Cliente: {reserva_modelo.rut_cliente}")
+    print(f"Paquete agregado: {reserva_modelo.paquete.nombre}")
+    for detalle in reserva_modelo.detalles:
+        print(
+            f"Detalle compuesto: {detalle.cantidad} x {detalle.paquete.nombre} "
+            f"= ${detalle.subtotal:.2f}"
+        )
+    print(f"Total de la reserva: ${reserva_modelo.total:.2f}")
+
     with tempfile.TemporaryDirectory(prefix="agencia-viajes-demo-") as directorio:
         database_path = Path(directorio) / "agencia-demo.db"
         with closing(sqlite3.connect(database_path)) as conexion:

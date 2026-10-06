@@ -4,7 +4,7 @@ Demostración automática de paquetes turísticos y compras locales. El proyecto
 
 ## Arquitectura
 
-- **Modelo:** `Paquete_Turistico` contiene los datos comunes y los modelos `Paquete_Nacional`, `Paquete_Internacional` y `Paquete_Crucero` especializan su comportamiento. El diagrama editable en Mermaid está en `model/diagrama_paquetes.mmd`; refleja los modelos y DAO actuales, incluido el factor fijo de cálculo usado por los paquetes internacional y crucero, y que la clase base es concreta.
+- **Modelo:** `Paquete_Turistico` contiene los datos comunes y los modelos `Paquete_Nacional`, `Paquete_Internacional` y `Paquete_Crucero` especializan su comportamiento. `Reserva` crea sus propios `DetalleReserva` y conserva una referencia al `Paquete_Turistico` existente. El diagrama editable en Mermaid está en `model/diagrama_paquetes.mmd`.
 - **Vista y flujo de demostración:** `main.py` crea e imprime los tres subtipos, prueba la validación del pasaporte, crea una reserva con su pago y presenta dos excepciones de negocio controladas.
 - **API REST local:** `main_api.py` expone catálogo público, login JWT, consulta FX y rutas protegidas de reserva e inventario.
 - **Persistencia:** `Dao` comparte la conexión y el cursor; `PaqueteDao` implementa las operaciones de almacenamiento para paquetes.
@@ -17,6 +17,7 @@ Demostración automática de paquetes turísticos y compras locales. El proyecto
 - Consultar el listado con detalles y precio calculado según el tipo de paquete.
 - Dar de baja paquetes sin borrar reservas, pagos ni historial.
 - Encapsular atributos del dominio mediante propiedades y atributos privados.
+- Representar composición Reserva–DetalleReserva y agregación Reserva–Paquete_Turistico.
 - Validar invariantes de paquetes al construirlos: código y duración positivos,
   nombre no vacío, precio finito y positivo, impuesto portuario finito y no
   negativo, y pasaporte estrictamente booleano.

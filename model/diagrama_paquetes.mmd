@@ -35,6 +35,29 @@ class Paquete_Crucero {
     +calcular_precio(tasa_cambio: float = None): float
 }
 
+class Reserva {
+    -__rut_cliente: str
+    -__paquete: Paquete_Turistico
+    -__detalles: list[DetalleReserva]
+    +__init__(rut_cliente: str, paquete: Paquete_Turistico, cantidad: int)
+    +paquete: Paquete_Turistico
+    +detalles: tuple[DetalleReserva, ...]
+    +total: float
+    +agregar_detalle(paquete: Paquete_Turistico, cantidad: int): None
+}
+
+class DetalleReserva {
+    -__paquete: Paquete_Turistico
+    -__cantidad: int
+    -__precio_unitario: float
+    -__subtotal: float
+    +__init__(paquete: Paquete_Turistico, cantidad: int)
+    +paquete: Paquete_Turistico
+    +cantidad: int
+    +precio_unitario: float
+    +subtotal: float
+}
+
 class Dao {
     +conexion: sqlite3.Connection
     +cursor: sqlite3.Cursor
@@ -55,6 +78,8 @@ class PaqueteDao {
 Paquete_Turistico <|-- Paquete_Nacional
 Paquete_Turistico <|-- Paquete_Internacional
 Paquete_Turistico <|-- Paquete_Crucero
+Reserva *-- "1..*" DetalleReserva : composición
+Reserva o-- "1" Paquete_Turistico : agregación
 Dao <|-- PaqueteDao
 PaqueteDao ..> Paquete_Turistico : persiste
 
