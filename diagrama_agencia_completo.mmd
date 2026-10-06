@@ -1,0 +1,121 @@
+%% BORRADOR: basado unicamente en los nombres y reglas mencionados en la conversacion.
+%% Los miembros y multiplicidades marcados como pendientes requieren cotejo con el informe 2 original.
+classDiagram
+direction TB
+
+class Persona {
+  %% Atributos y operaciones no disponibles en el material revisado.
+}
+
+class Cliente {
+  +validar_pasaporte(): tipo_pendiente
+}
+
+class Empleado {
+  %% Atributos y operaciones no disponibles en el material revisado.
+}
+
+class Administrador {
+  +aprobar_pago(): tipo_pendiente
+}
+
+class Agente_Viajes {
+  +atender_cliente(): tipo_pendiente
+}
+
+class Paquete_Turistico {
+  -codigo: tipo_pendiente
+  +calcular_precio(): tipo_pendiente
+}
+<<abstract>> Paquete_Turistico
+
+class Paquete_Nacional {
+  %% Miembros propios pendientes de cotejo.
+}
+
+class Paquete_Internacional {
+  %% Miembros propios pendientes de cotejo.
+}
+
+class Paquete_Crucero {
+  %% Miembros propios pendientes de cotejo.
+}
+
+class Servicio_Turistico {
+  -id_servicio: tipo_pendiente
+  +obtener_precio(): tipo_pendiente
+}
+<<abstract>> Servicio_Turistico
+
+class Hotel_Estancia {
+  %% Miembros propios pendientes de cotejo.
+}
+
+class Linea_Vuelo {
+  %% Miembros propios pendientes de cotejo.
+}
+
+class Excursion {
+  %% Miembros propios pendientes de cotejo.
+}
+
+class Seguro {
+  %% Miembros propios pendientes de cotejo.
+}
+
+class Reserva {
+  -tasa_cambio_aplicada: tipo_pendiente
+  +crear_reserva(): tipo_pendiente
+  +calcular_total(): tipo_pendiente
+  +validar_anticipo(): tipo_pendiente
+}
+
+class Pago {
+  +procesar_pago(): tipo_pendiente
+}
+
+class Boleta {
+  +emitir(): tipo_pendiente
+}
+
+class Proveedor {
+  %% cupos_disponibles se modela por fecha en Cupo, no como un total unico.
+}
+
+class Cupo {
+  -fecha: tipo_pendiente
+  -cupos_disponibles: tipo_pendiente
+}
+
+Persona <|-- Cliente
+Persona <|-- Empleado
+Empleado <|-- Administrador
+Empleado <|-- Agente_Viajes
+
+Paquete_Turistico <|-- Paquete_Nacional
+Paquete_Turistico <|-- Paquete_Internacional
+Paquete_Turistico <|-- Paquete_Crucero
+
+Servicio_Turistico <|-- Hotel_Estancia
+Servicio_Turistico <|-- Linea_Vuelo
+Servicio_Turistico <|-- Excursion
+Servicio_Turistico <|-- Seguro
+
+Cliente "1" -- "0..*" Reserva : realiza
+Reserva "1" -- "0..*" Pago : registra
+Reserva "0..*" -- "1" Paquete_Turistico : incluye
+Reserva "0..*" -- "0..*" Servicio_Turistico : recibe
+Pago "1" -- "0..1" Boleta : genera
+Administrador ..> Pago : gestiona y aprueba
+Administrador ..> Paquete_Turistico : gestiona
+Agente_Viajes ..> Cliente : atiende
+Proveedor "1" -- "0..*" Cupo : ofrece por fecha
+
+note for Reserva "Una reserva pendiente puede mantenerse retenida 15 minutos y existir sin pagos. La tasa aplicada queda en Reserva para conservar el valor usado en ese momento. Confirmar que la retencion se mida desde la creacion. Tipos de atributos y retornos pendientes de cotejo."
+note for Paquete_Turistico "calcular_precio() aparece como abstracto segun la revision del diagrama del informe 2. Confirmar contra el enunciado y el codigo de ese proyecto. El tipo de retorno esta pendiente."
+note for Servicio_Turistico "obtener_precio() aparece como abstracto segun la revision del diagrama del informe 2. Confirmar contra el enunciado y el codigo de ese proyecto. El tipo de retorno esta pendiente."
+note for Cliente "Se conserva validar_pasaporte() solo en Cliente para evitar duplicarlo tambien en Paquete_Internacional. Confirmar que esta responsabilidad corresponda al dominio. Su tipo de retorno esta pendiente."
+note for Cupo "Clase propuesta para representar disponibilidad por fecha. Tipos, atributos adicionales, restricciones y multiplicidades deben cotejarse con el enunciado."
+note for Boleta "Se usa emitir() en vez de registrar_pago(); confirmar el resto de los atributos y el ciclo de vida de la boleta."
+note for Administrador "Los atributos y retornos de operaciones estan pendientes. La responsabilidad de atender clientes no se asigna a esta clase."
+note for Agente_Viajes "Los atributos y retornos de operaciones estan pendientes. atender_cliente() queda unicamente en esta clase."

@@ -4,7 +4,7 @@ Aplicación de consola para registrar y administrar paquetes turísticos. El pro
 
 ## Arquitectura
 
-- **Modelo:** `Paquete_Turistico` contiene los datos comunes y los modelos `Paquete_Nacional`, `Paquete_Internacional` y `Paquete_Crucero` especializan su comportamiento.
+- **Modelo:** `Paquete_Turistico` contiene los datos comunes y los modelos `Paquete_Nacional`, `Paquete_Internacional` y `Paquete_Crucero` especializan su comportamiento. El diagrama editable en Mermaid está en `model/diagrama_paquetes.mmd`; refleja los modelos y DAO actuales, incluido el factor fijo de cálculo usado por los paquetes internacional y crucero, y que la clase base es concreta.
 - **Vista y flujo de aplicación:** `main.py` presenta el menú de consola, valida entradas y coordina las operaciones.
 - **API REST local:** `main_api.py` expone catálogo público, login JWT, consulta FX y rutas protegidas de reserva e inventario.
 - **Persistencia:** `Dao` comparte la conexión y el cursor; `PaqueteDao` implementa las operaciones de almacenamiento para paquetes.
