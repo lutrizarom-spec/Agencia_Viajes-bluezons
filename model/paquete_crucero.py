@@ -6,6 +6,7 @@ class Paquete_Crucero(Paquete_Turistico):  # Hereda los datos comunes y personal
     # Declara el constructor que recibe los datos generales y el impuesto específico del crucero.
     def __init__(self, codigo: int, nombre: str, duracion: int, precio_base: float, impuesto_puerto: float):  # Anota los tipos de los datos requeridos al construir esta instancia.
         super().__init__(codigo, nombre, duracion, precio_base)  # Inicializa mediante la clase padre los datos generales del paquete.
+        self._validar_monto(impuesto_puerto, "El impuesto portuario", permitir_cero=True)  # Exige un recargo finito no negativo; cero sigue siendo válido.
         self.__impuesto_puerto = impuesto_puerto  # Guarda de forma privada el impuesto portuario fijo asociado al crucero.
 
     @property  # Expone el impuesto como una propiedad de solo lectura sin dar acceso directo al atributo privado.

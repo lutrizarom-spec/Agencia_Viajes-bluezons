@@ -6,7 +6,7 @@ class Paquete_Internacional(Paquete_Turistico):  # Hereda los datos comunes del 
     # Declara el constructor que recibe los datos comunes y el estado de validez del pasaporte.
     def __init__(self, codigo: int, nombre: str, duracion: int, precio_base: float, pasaporte_valido: bool):  # Anota cada argumento para describir los valores esperados durante la creación.
         super().__init__(codigo, nombre, duracion, precio_base)  # Delega en la clase padre la inicialización de los datos compartidos.
-        self.__pasaporte_valido = pasaporte_valido  # Guarda el estado del pasaporte en un atributo privado de esta instancia.
+        self.pasaporte_valido = pasaporte_valido  # Reutiliza la validación del setter también durante la creación del objeto.
 
     @property  # Expone el estado del pasaporte como propiedad pública de solo lectura directa.
     def pasaporte_valido(self) -> bool:  # Declara la propiedad y documenta que devuelve un valor booleano.

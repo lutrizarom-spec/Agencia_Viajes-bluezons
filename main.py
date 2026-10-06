@@ -32,20 +32,24 @@ def registrar_paquete(paquete_dao: PaqueteDao) -> None:  # Define el flujo de co
     nombre = input("Nombre: ").strip()  # Captura el nombre y elimina espacios sobrantes al principio y al final.
     duracion = leer_entero("Duración en días: ")  # Captura la cantidad de días como un valor entero.
     precio_base = leer_decimal("Precio base: ")  # Captura el precio inicial como un valor decimal.
-    paquete: Paquete_Turistico  # Declara que la variable contendrá una instancia de la clase base o de uno de sus subtipos.
-    if tipo == 1:  # Selecciona el constructor nacional cuando el usuario eligió la primera categoría.
-        paquete = Paquete_Nacional(codigo, nombre, duracion, precio_base)  # Crea el paquete nacional con los datos comunes ingresados.
-    elif tipo == 2:  # Selecciona el constructor internacional cuando el usuario eligió la segunda categoría.
-        pasaporte_respuesta = leer_entero("¿Pasaporte válido? (1: Sí, 0: No): ")  # Solicita el estado del pasaporte mediante una opción numérica simple.
-        while pasaporte_respuesta not in (0, 1):  # Valida que el estado se exprese únicamente con 0 o 1.
-            print("Opción inválida: escriba 1 para Sí o 0 para No.")  # Informa el rango esperado cuando el valor no representa una respuesta válida.
-            pasaporte_respuesta = leer_entero("¿Pasaporte válido? (1: Sí, 0: No): ")  # Solicita de nuevo el estado hasta obtener una opción permitida.
-        paquete = Paquete_Internacional(codigo, nombre, duracion, precio_base, bool(pasaporte_respuesta))  # Crea el objeto internacional y convierte la opción a booleano.
-    else:  # Maneja la única categoría restante, que corresponde a los cruceros.
-        impuesto_puerto = leer_decimal("Impuesto portuario: ")  # Captura el impuesto fijo que se sumará al precio del crucero.
-        paquete = Paquete_Crucero(codigo, nombre, duracion, precio_base, impuesto_puerto)  # Crea el crucero con sus datos comunes y su impuesto específico.
-    paquete_dao.insertar_paquete(paquete)  # Persiste el paquete creado mediante el DAO y su inserción parametrizada.
-    print(f"Paquete '{nombre}' registrado correctamente.")  # Confirma al usuario que se terminó el registro.
+    try:  # Mantiene la aplicación de consola activa cuando el modelo rechaza datos fuera del dominio.
+        paquete: Paquete_Turistico  # Declara que la variable contendrá una instancia de la clase base o de uno de sus subtipos.
+        if tipo == 1:  # Selecciona el constructor nacional cuando el usuario eligió la primera categoría.
+            paquete = Paquete_Nacional(codigo, nombre, duracion, precio_base)  # Crea el paquete nacional con los datos comunes ingresados.
+        elif tipo == 2:  # Selecciona el constructor internacional cuando el usuario eligió la segunda categoría.
+            pasaporte_respuesta = leer_entero("¿Pasaporte válido? (1: Sí, 0: No): ")  # Solicita el estado del pasaporte mediante una opción numérica simple.
+            while pasaporte_respuesta not in (0, 1):  # Valida que el estado se exprese únicamente con 0 o 1.
+                print("Opción inválida: escriba 1 para Sí o 0 para No.")  # Informa el rango esperado cuando el valor no representa una respuesta válida.
+                pasaporte_respuesta = leer_entero("¿Pasaporte válido? (1: Sí, 0: No): ")  # Solicita de nuevo el estado hasta obtener una opción permitida.
+            paquete = Paquete_Internacional(codigo, nombre, duracion, precio_base, bool(pasaporte_respuesta))  # Crea el objeto internacional y convierte la opción a booleano.
+        else:  # Maneja la única categoría restante, que corresponde a los cruceros.
+            impuesto_puerto = leer_decimal("Impuesto portuario: ")  # Captura el impuesto fijo que se sumará al precio del crucero.
+            paquete = Paquete_Crucero(codigo, nombre, duracion, precio_base, impuesto_puerto)  # Crea el crucero con sus datos comunes y su impuesto específico.
+        paquete_dao.insertar_paquete(paquete)  # Persiste el paquete creado mediante el DAO y su inserción parametrizada.
+    except ValueError as error:  # Captura solo los errores de validación del dominio y no oculta fallos de base de datos.
+        print(f"No se pudo registrar el paquete: {error}")  # Explica el dato rechazado y permite que el menú continúe.
+        return  # Termina este intento sin insertar un paquete inválido.
+    print(f"Paquete '{paquete.nombre}' registrado correctamente.")  # Confirma el nombre canónico y el registro exitoso.
 
 
 def mostrar_paquetes(paquete_dao: PaqueteDao) -> None:  # Define la consulta y presentación de los paquetes almacenados.
@@ -84,7 +88,7 @@ def main() -> None:  # Define el punto principal de ejecución de la aplicación
             print("1. Crear tabla")  # Muestra la opción para crear o asegurar la tabla de paquetes.
             print("2. Registrar paquete (Nacional, Internacional o Crucero)")  # Muestra la opción para capturar uno de los subtipos disponibles.
             print("3. Listar paquetes y ver detalles/precios")  # Muestra la opción para consultar y presentar los paquetes registrados.
-            print("4. Eliminar paquete por código")  # Muestra la opción para borrar un paquete usando su identificador.
+            print("4. Dar de baja paquete por código")  # Aclara que se ocultará del catálogo sin borrar su historial.
             print("5. Salir")  # Muestra la opción que termina el programa.
             opcion = leer_entero("Seleccione una opción: ")  # Solicita y convierte a entero la acción elegida en el menú.
             if opcion == 1:  # Dirige la ejecución a la creación idempotente de la tabla.
@@ -94,13 +98,13 @@ def main() -> None:  # Define el punto principal de ejecución de la aplicación
                 registrar_paquete(paquete_dao)  # Solicita los datos del tipo elegido y los guarda en la base.
             elif opcion == 3:  # Dirige la ejecución a la consulta de todos los paquetes guardados.
                 mostrar_paquetes(paquete_dao)  # Presenta detalles y precio calculado para cada registro.
-            elif opcion == 4:  # Dirige la ejecución al flujo de eliminación de un registro existente.
-                codigo = leer_entero("Código del paquete que desea eliminar: ")  # Captura el código del paquete que se desea borrar.
-                eliminados = paquete_dao.eliminar_paquete(codigo)  # Ejecuta la eliminación y obtiene el número de filas afectadas.
-                if eliminados:  # Comprueba si la base de datos encontró y eliminó un paquete con ese código.
-                    print("Paquete eliminado correctamente.")  # Confirma que el registro indicado fue eliminado.
-                else:  # Maneja el caso en que el código solicitado no existe en la tabla.
-                    print("No se encontró un paquete con ese código.")  # Informa que no hubo registros que eliminar.
+            elif opcion == 4:  # Dirige la ejecución al flujo de baja lógica de un registro existente.
+                codigo = leer_entero("Código del paquete que desea dar de baja: ")  # Captura el código del paquete que se ocultará del catálogo.
+                desactivados = paquete_dao.eliminar_paquete(codigo)  # Cambia activo a cero y conserva las referencias históricas.
+                if desactivados:  # Comprueba si la base tenía el paquete publicado.
+                    print("Paquete dado de baja; su historial se conservó.")  # Confirma que dejó de venderse sin borrar las reservas.
+                else:  # Maneja código inexistente o que ya estaba inactivo.
+                    print("No se encontró un paquete activo con ese código.")  # Informa que no hubo una baja nueva que realizar.
             elif opcion == 5:  # Reconoce la opción de salida y termina el ciclo del menú.
                 print("Hasta luego.")  # Muestra un mensaje de despedida antes de liberar los recursos.
                 break  # Sale del bucle y continúa al bloque que cierra la conexión.
