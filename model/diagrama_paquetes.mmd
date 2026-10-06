@@ -86,7 +86,9 @@ Persona <|-- Cliente
 Paquete_Turistico <|-- Paquete_Nacional
 Paquete_Turistico <|-- Paquete_Internacional
 Paquete_Turistico <|-- Paquete_Crucero
-Cliente "1" o-- "0..*" Reserva : cliente existente
+
+Reserva "0..*" o-- "1" Cliente : cliente existente
 Reserva "0..*" o-- "1" Paquete_Turistico : paquete existente
 Reserva "1" *-- "0..*" Detalle_Reserva : compone
 Pago "1" *-- "1" Boleta : compone
+Pago "0..*" --> "1" Reserva : paga
