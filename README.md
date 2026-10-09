@@ -149,6 +149,22 @@ catálogo público y conserva sus reservas y pagos relacionados.
 | `GET /tipo-cambio` | Público | Retorna USD/CLP del proveedor FX o su caché SQLite. |
 | `PUT /admin/paquetes/{package_code}/inventario` | JWT de administrador | Configura capacidad local de un paquete y `travel_date`. |
 
+### Flujo de uso recomendado
+
+1. Aprovisiona por `AuthService` una cuenta `ADMINISTRADOR` y otra `CLIENTE`;
+   el ejemplo anterior muestra cómo crear la primera sin exponer registro
+   público ni contraseñas iniciales en la API.
+2. Inicia sesión en `/auth/login`. Usa el token de administrador para crear un
+   paquete en `/admin/paquetes` y configurar sus cupos/fecha en
+   `/admin/paquetes/{codigo}/inventario`.
+3. Consulta `/paquetes`; el cliente inicia sesión y compra con `POST /reservas`.
+   Conserva el mismo `X-Idempotency-Key` si debe reintentar la solicitud.
+4. Consulta `/reservas` y los pagos asociados. La cancelación de una compra
+   pagada queda bloqueada (`409`) hasta que se implemente un flujo de reembolso.
+
+Los cuerpos, respuestas y credenciales se pueden probar de extremo a extremo
+desde `/docs`; las compras solo simulan el estado del pago y no cobran dinero.
+
 La cancelación libera cupos y cierra pagos pendientes en una transacción. Una
 reserva con pagos confirmados responde `409 Conflict` y conserva su estado e
 inventario; no se permiten cancelaciones pagadas hasta incorporar reembolsos.
