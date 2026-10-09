@@ -235,10 +235,12 @@ una advertencia. No se almacenan credenciales SMTP en SQLite ni en el código.
 
 ### Reintentos e idempotencia de reservas
 
-`POST /reservas` acepta el encabezado opcional `X-Idempotency-Key` (1–128
-caracteres ASCII imprimibles). Se recomienda generar una clave distinta por
-intento lógico de compra y conservarla cuando se reintenta por timeout o pérdida
-de respuesta:
+`POST /reservas` y `POST /reservas/{reservation_id}/pagos` aceptan el encabezado
+opcional `X-Idempotency-Key` (1–128 caracteres ASCII imprimibles). Se
+recomienda generar una clave distinta por operación lógica y conservarla al
+reintentar por timeout o pérdida de respuesta. En abonos la clave queda acotada
+a la reserva y al monto; repetirla con el mismo monto devuelve el pago existente
+y cambiar el monto produce `409 Conflict`.
 
 ```http
 POST /reservas

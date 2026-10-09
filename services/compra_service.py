@@ -68,6 +68,10 @@ class PaymentTransitionConflictError(ValueError):
     """Señala que el estado de pago ya no permite la transición solicitada."""
 
 
+class PaymentIdempotencyConflictError(ValueError):
+    """Señala que una clave de abono se reutilizó con otro monto."""
+
+
 @dataclass(frozen=True)
 class ReservationReceipt:
     """Contiene el recibo de cupos retenidos y su pago local asociado."""
@@ -711,12 +715,19 @@ class CompraService:
         amount: float,
         *,
         is_admin: bool = False,
+        idempotency_key: str | None = None,
     ) -> PaymentReceipt:
         """Crea un pago parcial dentro del saldo, con un único intento pendiente."""
         self.expire_pending_payments()
         normalized_rut = normalize_rut(rut)
         if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) or amount <= 0:
             raise ValueError("El monto del pago debe ser finito y mayor que cero.")
+        normalized_key = self._normalize_idempotency_key(idempotency_key)
+        request_hash = (
+            hashlib.sha256(format(float(amount), ".17g").encode("ascii")).hexdigest()
+            if normalized_key is not None
+            else None
+        )
         now = datetime.now(timezone.utc)
         expires_at = (now + timedelta(seconds=PAYMENT_PENDING_TTL_SECONDS)).isoformat()
         with closing(self._connect()) as connection:
@@ -738,6 +749,23 @@ class CompraService:
                 ).fetchone()
                 if reservation is None or (not is_admin and reservation[0] != normalized_rut):
                     raise ReservationNotFoundError("No se encontró una reserva accesible.")
+                if normalized_key is not None:
+                    previous = connection.execute(
+                        """
+                        SELECT payment_id, reservation_id, amount, status,
+                               created_at, updated_at, expires_at, request_hash
+                        FROM payments
+                        WHERE reservation_id = ? AND idempotency_key = ?
+                        """,
+                        (reservation_id, normalized_key),
+                    ).fetchone()
+                    if previous is not None:
+                        if previous[7] != request_hash:
+                            raise PaymentIdempotencyConflictError(
+                                "La clave de idempotencia del pago ya se usó con otro monto."
+                            )
+                        connection.commit()
+                        return self._payment_from_row(previous[:7])
                 if reservation[2] != "confirmed":
                     raise PaymentTransitionConflictError("La reserva no está activa para recibir pagos.")
                 if reservation[4]:
@@ -751,11 +779,21 @@ class CompraService:
                     """
                     INSERT INTO payments (
                         payment_id, reservation_id, amount, status,
-                        created_at, updated_at, expires_at
+                        created_at, updated_at, expires_at,
+                        idempotency_key, request_hash
                     )
-                    VALUES (?, ?, ?, 'pending', ?, ?, ?)
+                    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)
                     """,
-                    (payment_id, reservation_id, float(amount), timestamp, timestamp, expires_at),
+                    (
+                        payment_id,
+                        reservation_id,
+                        float(amount),
+                        timestamp,
+                        timestamp,
+                        expires_at,
+                        normalized_key,
+                        request_hash,
+                    ),
                 )
                 connection.commit()
             except Exception:
@@ -1115,6 +1153,8 @@ class CompraService:
                         updated_at TEXT NOT NULL,
                         expires_at TEXT NOT NULL,
                         expired_at TEXT,
+                        idempotency_key TEXT,
+                        request_hash TEXT,
                         FOREIGN KEY (reservation_id) REFERENCES reservas (reservation_id)
                             ON DELETE CASCADE
                     )
@@ -1128,6 +1168,10 @@ class CompraService:
                     connection.execute("ALTER TABLE payments ADD COLUMN expires_at TEXT")  # Agrega el plazo sin eliminar estados de pago.
                 if "expired_at" not in payment_columns:  # Detecta la ausencia del instante en que el worker procesa la expiración.
                     connection.execute("ALTER TABLE payments ADD COLUMN expired_at TEXT")  # Diferencia pagos vencidos de pagos fallidos manualmente.
+                if "idempotency_key" not in payment_columns:
+                    connection.execute("ALTER TABLE payments ADD COLUMN idempotency_key TEXT")
+                if "request_hash" not in payment_columns:
+                    connection.execute("ALTER TABLE payments ADD COLUMN request_hash TEXT")
                 pending_without_deadline = connection.execute(
                     "SELECT payment_id, status, created_at FROM payments WHERE expires_at IS NULL"
                 ).fetchall()
@@ -1165,6 +1209,8 @@ class CompraService:
                             updated_at TEXT NOT NULL,
                             expires_at TEXT NOT NULL,
                             expired_at TEXT,
+                            idempotency_key TEXT,
+                            request_hash TEXT,
                             FOREIGN KEY (reservation_id) REFERENCES reservas (reservation_id)
                                 ON DELETE CASCADE
                         )
@@ -1174,10 +1220,12 @@ class CompraService:
                         """
                         INSERT INTO payments (
                             payment_id, reservation_id, amount, status,
-                            created_at, updated_at, expires_at, expired_at
+                            created_at, updated_at, expires_at, expired_at,
+                            idempotency_key, request_hash
                         )
                         SELECT payment_id, reservation_id, amount, status,
-                               created_at, updated_at, expires_at, expired_at
+                               created_at, updated_at, expires_at, expired_at,
+                               idempotency_key, request_hash
                         FROM payments_legacy_unique
                         """
                     )
@@ -1193,6 +1241,13 @@ class CompraService:
                     CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_one_pending_per_reservation
                     ON payments (reservation_id)
                     WHERE status = 'pending' AND expired_at IS NULL
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_payments_reservation_idempotency
+                    ON payments (reservation_id, idempotency_key)
+                    WHERE idempotency_key IS NOT NULL
                     """
                 )
                 connection.execute(  # Migra reservas anteriores como pagos históricos ya resueltos y no retiene inventario adicional.

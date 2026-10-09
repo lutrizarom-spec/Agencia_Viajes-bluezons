@@ -12,7 +12,10 @@ from pathlib import Path
 
 from dao.paquete_dao import PaqueteDao
 from model.paquete_nacional import Paquete_Nacional
-from services.compra_service import CompraService
+from services.compra_service import (
+    CompraService,
+    PaymentIdempotencyConflictError,
+)
 from services.notification_outbox import (
     LostOutboxClaimError,
     MailDeliveryError,
@@ -42,7 +45,7 @@ class NotificationOutboxTests(unittest.TestCase):
         self.service = CompraService(self.database_path)
         self.travel_date = date(2027, 1, 15)
         self.service.configure_capacity(701, self.travel_date, 2)
-        self.service.purchase_idempotently(
+        result = self.service.purchase_idempotently(
             "10.000.013-K",
             701,
             1,
@@ -50,6 +53,7 @@ class NotificationOutboxTests(unittest.TestCase):
             travel_date=self.travel_date,
             notification_email="cliente@example.com",
         )
+        self.reservation_id = result.receipt.reservation_id
 
     def tearDown(self) -> None:
         self.temp_directory.cleanup()
@@ -152,6 +156,30 @@ class NotificationOutboxTests(unittest.TestCase):
         with self.assertRaises(LostOutboxClaimError):
             repository.mark_sent(old_claim, now=later)
         repository.mark_sent(second, now=later)
+
+    def test_additional_payment_replays_by_key_and_rejects_changed_amount(self) -> None:
+        self.service.transition_payment(self.reservation_id, "confirmed")
+        first = self.service.create_payment(
+            self.reservation_id,
+            "10.000.013-K",
+            5000,
+            idempotency_key="payment-attempt-1",
+        )
+        replay = self.service.create_payment(
+            self.reservation_id,
+            "10.000.013-K",
+            5000,
+            idempotency_key="payment-attempt-1",
+        )
+        self.assertEqual(replay.payment_id, first.payment_id)
+
+        with self.assertRaises(PaymentIdempotencyConflictError):
+            self.service.create_payment(
+                self.reservation_id,
+                "10.000.013-K",
+                6000,
+                idempotency_key="payment-attempt-1",
+            )
 
 
 if __name__ == "__main__":

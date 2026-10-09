@@ -36,6 +36,7 @@ from services.compra_service import (  # Importa compra transaccional y errores 
     InsufficientCapacityError,
     InventoryNotConfiguredError,
     PackageNotFoundError,
+    PaymentIdempotencyConflictError,
     PaymentTransitionConflictError,
     PurchasePersistenceError,
     ReservationNotFoundError,
@@ -650,6 +651,9 @@ def create_app(
         payload: PaymentCreateRequest,
         reservation_id: Annotated[str, PathParameter(min_length=1, max_length=64)],
         identity: Annotated[UserIdentity, Depends(current_user)],
+        idempotency_key: Annotated[
+            str | None, Header(alias="X-Idempotency-Key", min_length=1, max_length=128)
+        ] = None,
     ) -> PaymentResponse:
         """Crea un abono parcial adicional dentro del saldo de la reserva."""
         try:
@@ -658,10 +662,13 @@ def create_app(
                 identity.rut,
                 payload.amount,
                 is_admin=identity.role is UserRole.ADMINISTRADOR,
+                idempotency_key=idempotency_key,
             )
         except ReservationNotFoundError as error:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
         except PaymentTransitionConflictError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except PaymentIdempotencyConflictError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
