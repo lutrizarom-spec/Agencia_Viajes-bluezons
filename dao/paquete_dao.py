@@ -8,11 +8,17 @@ from model.paquete_turistico import Paquete_Turistico  # Importa el modelo padre
 class PaqueteDao(Dao):  # Define el acceso a datos de paquetes y hereda la conexión y el cursor comunes.
     def crear_tabla(self) -> None:  # Define la operación que prepara la tabla de paquetes si todavía no existe.
         """Crea el esquema de paquetes sin reemplazar una tabla ya existente."""
-        self.cursor.execute("CREATE TABLE IF NOT EXISTS paquetes (codigo INTEGER PRIMARY KEY, nombre TEXT NOT NULL, duracion INTEGER NOT NULL, precio_base REAL NOT NULL, tipo TEXT NOT NULL, pasaporte_valido INTEGER, impuesto_puerto REAL, activo INTEGER NOT NULL DEFAULT 1 CHECK (activo IN (0, 1)))")  # Crea datos compartidos, campos específicos y la bandera de publicación.
-        columns = {column[1] for column in self.cursor.execute("PRAGMA table_info(paquetes)").fetchall()}  # Lee las columnas actuales para reconocer esquemas anteriores.
-        if "activo" not in columns:  # Comprueba si la base todavía no tiene soporte para baja lógica.
-            self.cursor.execute("ALTER TABLE paquetes ADD COLUMN activo INTEGER NOT NULL DEFAULT 1 CHECK (activo IN (0, 1))")  # Migra sin borrar datos y mantiene publicados los registros existentes.
-        self.conexion.commit()  # Confirma la creación de la tabla para hacerla persistente en la base de datos.
+        self.conexion.execute("SAVEPOINT package_schema_migration")
+        try:
+            self.cursor.execute("CREATE TABLE IF NOT EXISTS paquetes (codigo INTEGER PRIMARY KEY, nombre TEXT NOT NULL, duracion INTEGER NOT NULL, precio_base REAL NOT NULL, tipo TEXT NOT NULL, pasaporte_valido INTEGER, impuesto_puerto REAL, activo INTEGER NOT NULL DEFAULT 1 CHECK (activo IN (0, 1)))")  # Crea datos compartidos, campos específicos y la bandera de publicación.
+            columns = {column[1] for column in self.cursor.execute("PRAGMA table_info(paquetes)").fetchall()}  # Lee las columnas actuales para reconocer esquemas anteriores.
+            if "activo" not in columns:  # Comprueba si la base todavía no tiene soporte para baja lógica.
+                self.cursor.execute("ALTER TABLE paquetes ADD COLUMN activo INTEGER NOT NULL DEFAULT 1 CHECK (activo IN (0, 1))")  # Migra sin borrar datos y mantiene publicados los registros existentes.
+            self.conexion.execute("RELEASE SAVEPOINT package_schema_migration")
+        except Exception:
+            self.conexion.execute("ROLLBACK TO SAVEPOINT package_schema_migration")
+            self.conexion.execute("RELEASE SAVEPOINT package_schema_migration")
+            raise
 
     def insertar_paquete(self, paquete: Paquete_Turistico) -> None:  # Define la operación que almacena un objeto de cualquiera de los modelos de paquete.
         """Guarda los datos comunes y las columnas del subtipo correspondiente."""

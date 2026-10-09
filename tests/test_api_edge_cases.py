@@ -716,6 +716,62 @@ class ApiEdgeCaseTests(unittest.TestCase):
         self.assertEqual(migrated_payment, (40000.0, "pending"))  # Conserva el pago legado pendiente en vez de marcarlo confirmado.
         self.assertEqual(migrated_deadline, "2000-01-01T00:15:00+00:00")  # Calcula el vencimiento histórico con el TTL acordado.
 
+    def test_failed_schema_migration_rolls_back_all_schema_changes(self) -> None:
+        legacy_database = Path(self.temp_directory.name) / "broken-legacy.db"
+        with closing(sqlite3.connect(legacy_database)) as connection:
+            with connection:
+                connection.execute("CREATE TABLE paquetes (codigo INTEGER PRIMARY KEY)")
+                connection.execute(
+                    """
+                    CREATE TABLE reservas (
+                        reservation_id TEXT PRIMARY KEY,
+                        rut TEXT NOT NULL,
+                        package_code INTEGER NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        unit_price REAL NOT NULL,
+                        total_price REAL NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE payments (
+                        payment_id TEXT PRIMARY KEY,
+                        reservation_id TEXT NOT NULL UNIQUE,
+                        amount REAL NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO reservas VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    ("legacy-bad-date", "10000013-K", 202, 1, 100.0, 100.0, "2026-01-01"),
+                )
+                connection.execute(
+                    "INSERT INTO payments VALUES (?, ?, ?, ?, ?, ?)",
+                    ("payment-bad-date", "legacy-bad-date", 100.0, "pending", "2026-01-01", "2026-01-01"),
+                )
+
+        with self.assertRaisesRegex(ValueError, "sin zona horaria"):
+            CompraService(legacy_database)
+
+        with closing(sqlite3.connect(legacy_database)) as connection:
+            reservation_columns = {
+                column[1] for column in connection.execute("PRAGMA table_info(reservas)")
+            }
+            payment_columns = {
+                column[1] for column in connection.execute("PRAGMA table_info(payments)")
+            }
+            inventory = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'package_inventory'"
+            ).fetchone()
+        self.assertNotIn("unit_price_minor", reservation_columns)
+        self.assertNotIn("expires_at", payment_columns)
+        self.assertIsNone(inventory)
+
     def test_purchase_retries_only_locked_operational_errors(self) -> None:
         """Un SQLITE_BUSY transitorio reintenta una vez antes de confirmar la compra."""
         service = CompraService(self.database_path, max_write_attempts=3, retry_delay_seconds=0.01)  # Inyecta política corta y determinista.

@@ -136,6 +136,7 @@ class RateLimiter:
     def _ensure_schema(self) -> None:
         """Crea la tabla de conteo y el índice que acelera la limpieza de vencidos."""
         with closing(sqlite3.connect(self._database_path, timeout=10)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
             with connection:  # Confirma tanto la tabla como el índice en una sola transacción.
                 connection.execute(
                     """

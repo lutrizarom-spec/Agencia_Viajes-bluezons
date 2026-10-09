@@ -1070,6 +1070,7 @@ class CompraService:
     def _ensure_schema(self) -> None:
         """Crea inventario y reservas después de que la tabla paquetes ya exista."""
         with closing(self._connect()) as connection:  # Abre SQLite con claves foráneas y cierra el descriptor al terminar.
+            connection.execute("BEGIN IMMEDIATE")  # Agrupa cambios de esquema y conversión de datos en una migración atómica.
             with connection:  # Confirma la creación de ambas tablas o revierte si falla el esquema.
                 connection.execute(  # Define la capacidad vendible y el contador acumulado por paquete.
                     """

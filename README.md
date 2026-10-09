@@ -271,6 +271,9 @@ cupos. Reutilizar
 la clave con otro paquete o cantidad produce `409 Conflict`. La clave, la huella
 del cuerpo y el recibo se confirman junto con el descuento de inventario; la
 migración del esquema añade columnas e índice sin borrar reservas existentes.
+Las migraciones locales de reservas, pagos, inventario, paquetes y límites se
+ejecutan transaccionalmente; si falla la conversión de datos heredados, los
+cambios parciales de esquema se revierten y el error se informa al iniciar.
 Las compras sin encabezado conservan el comportamiento anterior y no son
 idempotentes.
 
