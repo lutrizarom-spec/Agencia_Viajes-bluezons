@@ -1,5 +1,23 @@
+# Python
 __pycache__/
-.pytest_cache/
+*.py[cod]
 .venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Base de datos local (incluye archivos auxiliares de SQLite)
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Secretos y configuración local
+.env
+.env.*
+
+# Editor
 .vscode/
+.idea/

@@ -276,6 +276,7 @@ def create_app(
     notification_mailer: Mailer | None = None,
 ) -> FastAPI:
     """Construye e inyecta servicios locales; se usa con Uvicorn en modo factory."""
+    logging.basicConfig(level=os.environ.get("AGENCIA_LOG_LEVEL", "INFO").upper())  # Uvicorn solo configura sus loggers; sin esto los INFO de la app no se ven.
     resolved_database = Path(  # Resuelve la base configurada o la agencia.db junto al código de la aplicación.
         database_path
         or os.environ.get("AGENCIA_DB_PATH")
@@ -312,9 +313,9 @@ def create_app(
             await asyncio.sleep(PAYMENT_EXPIRY_SWEEP_SECONDS)  # Evita consultas constantes a SQLite entre ciclos.
             try:  # Corre SQLite en un hilo para no bloquear el event loop que atiende requests.
                 expired_count = await asyncio.to_thread(compra_service.expire_pending_payments)  # Cancela reservas expiradas de manera transaccional.
-            except Exception:  # Registra incluso errores inesperados y propaga para que el worker no falle silenciosamente.
-                logger.exception("Falló el barrido periódico de pagos pendientes.")  # Conserva traceback y permite observar el fallo operativo.
-                raise  # El error no se convierte en un ciclo de falsa salud.
+            except Exception:  # Un fallo transitorio (p. ej. SQLite ocupada) no debe detener el worker para siempre.
+                logger.exception("Falló el barrido periódico de pagos pendientes; se reintentará en el próximo ciclo.")  # Conserva traceback y deja visible el fallo.
+                continue  # La espera ocurre al inicio del ciclo, así que no hay bucle apretado.
             if expired_count:  # Evita logs repetidos cuando no había nada que vencer.
                 logger.info("Se vencieron %s pagos pendientes y se liberó su inventario.", expired_count)  # Informa el impacto del ciclo.
 
@@ -326,8 +327,9 @@ def create_app(
             try:
                 result = await asyncio.to_thread(outbox_worker.process_batch)
             except Exception:
-                logger.exception("Falló el worker de notificaciones outbox.")
-                raise
+                logger.exception("Falló el worker de notificaciones outbox; se reintentará.")
+                await asyncio.sleep(NOTIFICATION_OUTBOX_POLL_SECONDS)  # Evita un bucle apretado si el error persiste.
+                continue
             if result["sent"] or result["failed"] or result["dead"]:
                 logger.info(
                     "Outbox: enviados=%s fallidos=%s definitivos=%s.",
