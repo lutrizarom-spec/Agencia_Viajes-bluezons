@@ -20,6 +20,7 @@ from services.compra_service import (
 from services.notification_outbox import (
     LostOutboxClaimError,
     MailDeliveryError,
+    OutboxEventNotFoundError,
     OutboxRepository,
     OutboxWorker,
     SmtpMailer,
@@ -158,6 +159,35 @@ class NotificationOutboxTests(unittest.TestCase):
         with self.assertRaises(LostOutboxClaimError):
             repository.mark_sent(old_claim, now=later)
         repository.mark_sent(second, now=later)
+
+    def test_dead_event_can_be_inspected_and_retried_without_exposing_payload(self) -> None:
+        repository = OutboxRepository(self.database_path)
+        message = repository.claim_batch()[0]
+        self.assertTrue(
+            repository.mark_failed(
+                message,
+                MailDeliveryError("SMTP temporarily unavailable"),
+                max_attempts=1,
+                backoff_seconds=(0,),
+            )
+        )
+        event = repository.list_events()[0]
+        self.assertEqual(event["status"], "dead")
+        self.assertNotIn("payload_json", event)
+        self.assertNotIn("recipient", event)
+
+        repository.retry_dead_event(message.id)
+        self.assertEqual(repository.list_events()[0]["status"], "pending")
+        self.assertEqual(repository.claim_batch()[0].id, message.id)
+
+    def test_only_dead_events_can_be_retried(self) -> None:
+        repository = OutboxRepository(self.database_path)
+        with self.assertRaises(OutboxEventNotFoundError):
+            repository.retry_dead_event(999)
+        message = repository.claim_batch()[0]
+        repository.mark_sent(message)
+        with self.assertRaises(OutboxEventNotFoundError):
+            repository.retry_dead_event(message.id)
 
     def test_additional_payment_replays_by_key_and_rejects_changed_amount(self) -> None:
         self.service.transition_payment(self.reservation_id, "confirmed")

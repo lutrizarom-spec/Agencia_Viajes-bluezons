@@ -11,7 +11,7 @@ from datetime import date  # Valida y transporta la fecha solicitada para el via
 from pathlib import Path  # Resuelve rutas de base locales de manera independiente del directorio actual.
 from typing import Annotated, Literal  # Expresa dependencias, validaciones y estados admitidos del flujo de pago.
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Path as PathParameter, Response, status  # Define rutas, headers HTTP, respuestas y errores.
+from fastapi import Depends, FastAPI, Header, HTTPException, Path as PathParameter, Query, Response, status  # Define rutas, headers HTTP, respuestas y errores.
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer  # Extrae el token Bearer enviado por Authorization.
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator  # Valida cuerpos JSON y documenta esquemas OpenAPI.
 
@@ -50,7 +50,13 @@ from services.fx_service import (  # Inyecta proveedor externo y traduce falta d
     mindicador_usd_clp_provider,
 )
 from services.rate_limiter import RateLimiter  # Aplica límites locales persistidos a las rutas sensibles.
-from services.notification_outbox import Mailer, OutboxWorker, SmtpMailer
+from services.notification_outbox import (
+    Mailer,
+    OutboxEventNotFoundError,
+    OutboxRepository,
+    OutboxWorker,
+    SmtpMailer,
+)
 
 PAYMENT_EXPIRY_SWEEP_SECONDS = 30  # Limita a treinta segundos la demora adicional para liberar un pago vencido.
 NOTIFICATION_OUTBOX_POLL_SECONDS = 2
@@ -369,6 +375,7 @@ def create_app(
     app.state.compra_service = compra_service  # Comparte la compra atómica entre solicitudes.
     app.state.fx_service = fx_service  # Comparte circuito/cache del proveedor mientras vive el proceso.
     app.state.outbox_worker = outbox_worker
+    app.state.outbox_repository = OutboxRepository(resolved_database)
     app.state.database_path = resolved_database  # Permite a rutas y pruebas inspeccionar la ubicación activa.
     bearer_scheme = HTTPBearer(auto_error=False)  # Deja que la dependencia convierta credenciales ausentes a un 401 uniforme.
 
@@ -390,6 +397,30 @@ def create_app(
         if identity.role is not UserRole.ADMINISTRADOR:  # Comprueba autorización, separada de la verificación JWT.
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Se requiere rol administrador.")  # Distingue acceso autenticado pero no autorizado.
         return identity  # Entrega la identidad administrativa a la operación protegida.
+
+    @app.get("/admin/outbox", tags=["Administración"])
+    def list_outbox_events(
+        identity: Annotated[UserIdentity, Depends(administrator_only)],
+        limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    ) -> list[dict[str, object]]:
+        """Lista estado y errores de entrega sin exponer correo ni contenido."""
+        _ = identity
+        return app.state.outbox_repository.list_events(limit=limit)
+
+    @app.post("/admin/outbox/{event_id}/retry", status_code=status.HTTP_204_NO_CONTENT, tags=["Administración"])
+    def retry_outbox_event(
+        event_id: Annotated[int, PathParameter(ge=1)],
+        identity: Annotated[UserIdentity, Depends(administrator_only)],
+    ) -> Response:
+        """Reencola únicamente eventos agotados, con autorización administrativa."""
+        _ = identity
+        try:
+            app.state.outbox_repository.retry_dead_event(event_id)
+        except OutboxEventNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+            ) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post("/auth/login", response_model=TokenResponse, tags=["Autenticación"])  # Publica el login de usuarios por RUT y clave.
     def login(payload: LoginRequest) -> TokenResponse:

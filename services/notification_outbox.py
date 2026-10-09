@@ -30,6 +30,10 @@ class LostOutboxClaimError(RuntimeError):
     """La reclamación del evento venció o fue tomada por otro worker."""
 
 
+class OutboxEventNotFoundError(LookupError):
+    """No existe un evento de outbox con el identificador solicitado."""
+
+
 class Mailer(Protocol):
     def send(
         self, *, recipient: str, subject: str, body: str, message_id: str
@@ -194,6 +198,48 @@ class OutboxRepository:
 
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = str(database_path)
+
+    def list_events(self, *, limit: int = 100) -> list[dict[str, object]]:
+        """Lista metadatos operativos sin exponer destinatarios ni contenido."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise ValueError("limit debe ser un entero entre 1 y 1000.")
+        with closing(sqlite3.connect(self.database_path, timeout=10)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT id, event_key, status, attempts, next_attempt_at,
+                       claim_until, last_error, created_at, processed_at
+                FROM notification_outbox
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def retry_dead_event(self, event_id: int, *, now: datetime | None = None) -> None:
+        """Reencola explícitamente un evento agotado sin reabrir otros estados."""
+        if isinstance(event_id, bool) or not isinstance(event_id, int) or event_id < 1:
+            raise ValueError("event_id debe ser un entero positivo.")
+        current_iso = (
+            now or datetime.now(timezone.utc)
+        ).astimezone(timezone.utc).isoformat()
+        with closing(sqlite3.connect(self.database_path, timeout=10)) as connection:
+            with connection:
+                updated = connection.execute(
+                    """
+                    UPDATE notification_outbox
+                    SET status = 'pending', attempts = 0, next_attempt_at = ?,
+                        claim_token = NULL, claim_until = NULL, last_error = NULL,
+                        processed_at = NULL
+                    WHERE id = ? AND status = 'dead'
+                    """,
+                    (current_iso, event_id),
+                ).rowcount
+        if updated != 1:
+            raise OutboxEventNotFoundError(
+                f"No existe un evento dead-letter con id {event_id}."
+            )
 
     def claim_batch(
         self,

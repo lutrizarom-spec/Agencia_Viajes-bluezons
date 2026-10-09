@@ -139,6 +139,8 @@ catálogo público y conserva sus reservas y pagos relacionados.
 | `POST /reservas/{reservation_id}/cancelar` | JWT requerido | Cancela una reserva propia; un administrador puede cancelar cualquier reserva. |
 | `GET /admin/reservas` | JWT de administrador | Lista el historial de reservas de todos los clientes. |
 | `GET /admin/paquetes` | JWT de administrador | Lista paquetes activos e inactivos, incluidos sus campos específicos. |
+| `GET /admin/outbox?limit=100` | JWT de administrador | Lista estado, intentos y último error sin exponer destinatario ni contenido del correo. |
+| `POST /admin/outbox/{event_id}/retry` | JWT de administrador | Reencola un evento dead-letter; rechaza eventos que no estén agotados. |
 | `POST /admin/paquetes` | JWT de administrador | Crea un paquete nacional, internacional, crucero o genérico. |
 | `PUT /admin/paquetes/{package_code}` | JWT de administrador | Edita un paquete activo sin cambiar su código. |
 | `DELETE /admin/paquetes/{package_code}` | JWT de administrador | Lo oculta mediante baja lógica; una repetición es segura e idempotente. |
@@ -256,6 +258,9 @@ fallo con backoff y dead-letter tras cinco intentos. Si un proceso se cae, otro
 puede reclamar el evento al vencer el lease. La entrega es de tipo *at least
 once*: una caída después del envío y antes de registrar `sent` todavía puede
 causar un correo repetido.
+Administración puede inspeccionar eventos y reintentar únicamente los que
+agotaron sus intentos mediante las rutas `/admin/outbox`; el listado excluye
+payload/destinatario. Las operaciones de correo siguen siendo *at least once*.
 
 Configura `AGENCIA_SMTP_HOST` y `AGENCIA_SMTP_SENDER`; opcionalmente
 `AGENCIA_SMTP_PORT` (587), `AGENCIA_SMTP_USERNAME`,

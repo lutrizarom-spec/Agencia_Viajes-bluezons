@@ -216,6 +216,19 @@ class ApiEdgeCaseTests(unittest.TestCase):
         hidden_payment = self.client.get(f"/reservas/{reservation_id}/pago", headers=self._client_headers())  # Comprueba que el estado de pago también respeta la propiedad.
         self.assertEqual(hidden_payment.status_code, 404)  # Evita revelar pagos de otros clientes.
 
+    def test_outbox_operational_routes_are_admin_only(self) -> None:
+        customer_list = self.client.get("/admin/outbox", headers=self._client_headers())
+        self.assertEqual(customer_list.status_code, 403)
+        admin_list = self.client.get("/admin/outbox", headers=self._admin_headers())
+        self.assertEqual(admin_list.status_code, 200)
+        self.assertEqual(admin_list.json(), [])
+        self.assertEqual(
+            self.client.post(
+                "/admin/outbox/1/retry", headers=self._admin_headers()
+            ).status_code,
+            404,
+        )
+
     def test_cannot_cancel_reservation_with_confirmed_payment(self) -> None:
         self.client.put(
             "/admin/paquetes/202/inventario",
