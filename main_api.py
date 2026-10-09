@@ -604,6 +604,8 @@ def create_app(
             )  # Un segundo intento devuelve la misma reserva cancelada sin liberar cupos otra vez.
         except ReservationNotFoundError as error:  # Trata inexistencia y propiedad ajena con la misma respuesta.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error  # No revela si el UUID ajeno existe.
+        except PaymentTransitionConflictError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except DatabaseBusyError as error:  # Informa que la base requiere un reintento posterior.
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error), headers={"Retry-After": "1"}) from error  # Permite retry sin ocultar el bloqueo.
         except PurchasePersistenceError as error:  # Evita exponer detalles SQLite.

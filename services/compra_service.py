@@ -620,6 +620,10 @@ class CompraService:
                     return self._receipt_from_row(row)  # Devuelve el estado cancelado original como operación idempotente.
                 if row[7] != "confirmed":  # Evita cambios implícitos desde estados futuros desconocidos.
                     raise PurchasePersistenceError("La reserva tiene un estado no cancelable.")  # Exige transiciones explícitas para estados nuevos.
+                if int(row[15]) > 0:
+                    raise PaymentTransitionConflictError(
+                        "La reserva tiene pagos confirmados; no se puede cancelar sin un flujo de reembolso."
+                    )
 
                 cancelled_at = datetime.now(timezone.utc).isoformat()  # Registra el instante UTC en que el estado cambia.
                 changed = connection.execute(  # Cambia el estado con condición para garantizar una transición única.
@@ -655,7 +659,7 @@ class CompraService:
 
                 connection.commit()  # Confirma estado y recuperación de capacidad conjuntamente.
                 return self._find_reservation_by_id(connection, reservation_id)  # Devuelve la reserva con todos sus pagos y saldos actualizados.
-            except (ReservationNotFoundError, PurchasePersistenceError):  # Revierte antes de propagar errores de dominio explícitos.
+            except (ReservationNotFoundError, PaymentTransitionConflictError, PurchasePersistenceError):  # Revierte antes de propagar errores de dominio explícitos.
                 connection.rollback()  # Conserva la reserva y los cupos si no pudo completar ambas operaciones.
                 raise  # Propaga el error original para que la API lo traduzca explícitamente.
             except sqlite3.Error:  # Revierte explícitamente errores SQLite no traducidos antes de que el wrapper los clasifique.

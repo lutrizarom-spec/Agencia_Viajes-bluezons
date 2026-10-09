@@ -216,6 +216,34 @@ class ApiEdgeCaseTests(unittest.TestCase):
         hidden_payment = self.client.get(f"/reservas/{reservation_id}/pago", headers=self._client_headers())  # Comprueba que el estado de pago también respeta la propiedad.
         self.assertEqual(hidden_payment.status_code, 404)  # Evita revelar pagos de otros clientes.
 
+    def test_cannot_cancel_reservation_with_confirmed_payment(self) -> None:
+        self.client.put(
+            "/admin/paquetes/202/inventario",
+            json={"total_capacity": 2, "travel_date": TRAVEL_DATE_JSON},
+            headers=self._admin_headers(),
+        )
+        purchase = self.client.post(
+            "/reservas",
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},
+            headers=self._client_headers(),
+        )
+        reservation_id = purchase.json()["reservation_id"]
+        self.app.state.compra_service.transition_payment(reservation_id, "confirmed")
+
+        cancellation = self.client.post(
+            f"/reservas/{reservation_id}/cancelar",
+            headers=self._client_headers(),
+        )
+
+        self.assertEqual(cancellation.status_code, 409)
+        self.assertIn("sin un flujo de reembolso", cancellation.json()["detail"])
+        reservation = self.client.get(
+            "/reservas", headers=self._client_headers()
+        ).json()[0]
+        self.assertEqual(reservation["status"], "confirmed")
+        self.assertEqual(reservation["payment_status"], "confirmed")
+        self.assertEqual(self.client.get("/paquetes").json()[0]["cupos_disponibles"], 1)
+
     def test_payment_stays_pending_until_admin_confirms_and_replays_safely(self) -> None:
         """La compra retiene cupos; solo el admin confirma pago y los retries no duplican efectos."""
         self.client.put(  # Prepara dos plazas antes de crear la reserva pendiente de pago.

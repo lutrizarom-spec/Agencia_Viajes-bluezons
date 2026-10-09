@@ -30,7 +30,7 @@ class Reserva:
         self.cliente = cliente
         self.paquete = paquete
         self.tasa_cambio_aplicada = tasa_cambio_aplicada
-        self.estado = "pendiente"
+        self.__estado = "pendiente"
         self.__detalles: list[Detalle_Reserva] = []
 
     @property
@@ -94,13 +94,6 @@ class Reserva:
     def estado(self) -> str:
         return self.__estado
 
-    @estado.setter
-    def estado(self, valor: str) -> None:
-        estados_permitidos = {"pendiente", "confirmada", "cancelada"}
-        if not isinstance(valor, str) or valor not in estados_permitidos:
-            raise ValueError("El estado de reserva no es válido.")
-        self.__estado = valor
-
     @property
     def detalles(self) -> tuple[Detalle_Reserva, ...]:
         return tuple(self.__detalles)
@@ -120,6 +113,10 @@ class Reserva:
 
     def agregar_detalle(self, cantidad: int) -> Detalle_Reserva:
         """Valida el pasaporte y compone internamente una línea de detalle."""
+        if self.estado != "pendiente":
+            raise ValueError("Solo se pueden agregar detalles a una reserva pendiente.")
+        if self.fecha_viaje < self.fecha_reserva:
+            raise ValueError("La fecha de viaje no puede preceder a la reserva.")
         if self.paquete.requiere_pasaporte and not self.cliente.validar_pasaporte():
             raise PasaporteRequeridoError(
                 "Se requiere un pasaporte registrado para reservar un paquete internacional."
@@ -153,9 +150,21 @@ class Reserva:
     def confirmar(self) -> bool:
         if not self.__detalles:
             raise ValueError("No se puede confirmar una reserva sin detalles.")
-        self.estado = "confirmada"
+        self._transicionar("confirmada")
         return True
 
     def cancelar(self) -> bool:
-        self.estado = "cancelada"
+        self._transicionar("cancelada")
         return True
+
+    def _transicionar(self, nuevo_estado: str) -> None:
+        transiciones = {
+            "pendiente": {"confirmada", "cancelada"},
+            "confirmada": {"cancelada"},
+            "cancelada": set(),
+        }
+        if nuevo_estado not in transiciones.get(self.estado, set()):
+            raise ValueError(
+                f"No se puede pasar de '{self.estado}' a '{nuevo_estado}'."
+            )
+        self.__estado = nuevo_estado

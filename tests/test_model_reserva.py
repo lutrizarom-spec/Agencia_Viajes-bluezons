@@ -59,6 +59,28 @@ class ReservationModelTests(unittest.TestCase):
             [1, 2],
         )
 
+    def test_reservation_rejects_invalid_state_transitions_and_mutation(self) -> None:
+        self.reservation.agregar_detalle(1)
+        self.assertTrue(self.reservation.confirmar())
+        with self.assertRaises(AttributeError):
+            self.reservation.estado = "cancelada"
+        with self.assertRaises(ValueError):
+            self.reservation.agregar_detalle(1)
+        self.assertTrue(self.reservation.cancelar())
+        with self.assertRaises(ValueError):
+            self.reservation.cancelar()
+
+    def test_reservation_rejects_travel_before_booking_date(self) -> None:
+        reservation = Reserva(
+            "RES-305",
+            date(2026, 12, 15),
+            date(2026, 10, 6),
+            self.client,
+            self.package,
+        )
+        with self.assertRaisesRegex(ValueError, "no puede preceder"):
+            reservation.agregar_detalle(1)
+
     def test_reservation_rejects_non_client_or_non_package_aggregation(self) -> None:
         with self.assertRaises(TypeError):
             Reserva(

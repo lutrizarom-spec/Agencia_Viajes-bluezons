@@ -149,6 +149,10 @@ catálogo público y conserva sus reservas y pagos relacionados.
 | `GET /tipo-cambio` | Público | Retorna USD/CLP del proveedor FX o su caché SQLite. |
 | `PUT /admin/paquetes/{package_code}/inventario` | JWT de administrador | Configura capacidad local de un paquete y `travel_date`. |
 
+La cancelación libera cupos y cierra pagos pendientes en una transacción. Una
+reserva con pagos confirmados responde `409 Conflict` y conserva su estado e
+inventario; no se permiten cancelaciones pagadas hasta incorporar reembolsos.
+
 `services.compra_service.CompraService` registra inventario y reservas en
 `package_inventory`, `reservas` y `payments`. El inventario se identifica por
 paquete y fecha de viaje, y la compra descuenta cupos de esa fecha bajo
