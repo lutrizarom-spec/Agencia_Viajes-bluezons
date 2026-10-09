@@ -324,6 +324,30 @@ pytest
 `pytest.ini` configura la ruta raíz para ambos comandos. GitHub Actions ejecuta
 la misma suite al subir cambios a `main` y en cada pull request.
 
+### Copias de seguridad y recuperación local
+
+Con `AGENCIA_DB_PATH` apuntando a la base activa, crea una copia consistente
+incluso mientras la aplicación usa SQLite. El destino debe ser nuevo; no se
+sobrescriben copias existentes:
+
+```powershell
+$backup = Join-Path $env:USERPROFILE "AgenciaBackups\agencia-$(Get-Date -Format 'yyyyMMdd-HHmmss').db"
+python scripts\backup_database.py $env:AGENCIA_DB_PATH $backup
+```
+
+El script comprueba `PRAGMA integrity_check` antes de informar éxito. Guarda las
+copias fuera del repositorio, limita su acceso y cifra el almacenamiento según
+la política de datos de la organización: el script no cifra ni replica copias
+remotamente. Para restaurar, detén todos los procesos de la API, conserva una
+copia aparte del archivo actual y reemplázalo manualmente por una copia
+verificada; después inicia la aplicación y comprueba `/docs` y los registros.
+
+Esta guía prepara el uso local; no configura hosting, TLS, gestor de secretos,
+alertas ni recuperación ante desastre. Antes de producción, aprovisiona el
+secreto JWT y las credenciales SMTP mediante un gestor seguro, publica la API
+tras un proxy HTTPS y planifica copias externas cifradas y pruebas periódicas
+de restauración. Los pagos siguen siendo simulados; no se cobran fondos reales.
+
 ## Bitácora de Avances
 
 ### 2026-10-03 — Configuración del proyecto y estructura base
