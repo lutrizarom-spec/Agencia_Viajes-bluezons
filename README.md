@@ -134,7 +134,7 @@ catálogo público y conserva sus reservas y pagos relacionados.
 |---|---|---|
 | `POST /auth/login` | Público, limitado por RUT | Autentica con `rut` y `password`; retorna JWT Bearer. |
 | `GET /paquetes?travel_date=YYYY-MM-DD` | Público | Lista paquetes y disponibilidad para esa fecha; sin fecha, informa cupos agregados. |
-| `POST /reservas` | JWT requerido | Compra `package_code`, `quantity` y `travel_date`; asocia el RUT autenticado. |
+| `POST /reservas` | JWT requerido | Compra `package_code`, `quantity` y `travel_date`; opcionalmente encola una notificación con `notification_email`. |
 | `GET /reservas` | JWT requerido | Lista únicamente las reservas asociadas al RUT del token. |
 | `POST /reservas/{reservation_id}/cancelar` | JWT requerido | Cancela una reserva propia; un administrador puede cancelar cualquier reserva. |
 | `GET /admin/reservas` | JWT de administrador | Lista el historial de reservas de todos los clientes. |
@@ -215,6 +215,23 @@ aproximadamente un intervalo de barrido; al reiniciar se procesan
 inmediatamente los vencimientos ocurridos mientras estaba detenida. Los
 errores del worker quedan registrados y las transiciones manuales también
 ejecutan primero un barrido para impedir confirmar un pago vencido.
+
+### Notificaciones por correo con outbox
+
+`POST /reservas` acepta `notification_email` opcional. Si se entrega, la reserva
+y el evento de notificación se guardan dentro de la misma transacción SQLite;
+un reintento idempotente no genera un segundo evento. El worker reclama eventos
+con un lease transaccional, envía fuera de la transacción y registra éxito o
+fallo con backoff y dead-letter tras cinco intentos. Si un proceso se cae, otro
+puede reclamar el evento al vencer el lease. La entrega es de tipo *at least
+once*: una caída después del envío y antes de registrar `sent` todavía puede
+causar un correo repetido.
+
+Configura `AGENCIA_SMTP_HOST` y `AGENCIA_SMTP_SENDER`; opcionalmente
+`AGENCIA_SMTP_PORT` (587), `AGENCIA_SMTP_USERNAME`,
+`AGENCIA_SMTP_PASSWORD`, `AGENCIA_SMTP_USE_SSL` y `AGENCIA_SMTP_TIMEOUT` (10).
+El servidor inicia sin SMTP, pero deja las notificaciones en cola y registra
+una advertencia. No se almacenan credenciales SMTP en SQLite ni en el código.
 
 ### Reintentos e idempotencia de reservas
 

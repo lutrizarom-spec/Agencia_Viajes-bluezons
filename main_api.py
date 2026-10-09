@@ -12,7 +12,7 @@ from typing import Annotated, Literal  # Expresa dependencias, validaciones y es
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path as PathParameter, Response, status  # Define rutas, headers HTTP, respuestas y errores.
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer  # Extrae el token Bearer enviado por Authorization.
-from pydantic import BaseModel, ConfigDict, Field, model_validator  # Valida cuerpos JSON y documenta esquemas OpenAPI.
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator  # Valida cuerpos JSON y documenta esquemas OpenAPI.
 
 from dao.paquete_dao import PaqueteDao  # Reutiliza la lectura del catálogo ya implementada.
 from model.paquete_crucero import Paquete_Crucero  # Calcula precio del subtipo crucero mediante su modelo existente.
@@ -47,8 +47,10 @@ from services.fx_service import (  # Inyecta proveedor externo y traduce falta d
     mindicador_usd_clp_provider,
 )
 from services.rate_limiter import RateLimiter  # Aplica límites locales persistidos a las rutas sensibles.
+from services.notification_outbox import Mailer, OutboxWorker, SmtpMailer
 
 PAYMENT_EXPIRY_SWEEP_SECONDS = 30  # Limita a treinta segundos la demora adicional para liberar un pago vencido.
+NOTIFICATION_OUTBOX_POLL_SECONDS = 2
 logger = logging.getLogger(__name__)  # Usa el logger estándar para observar fallos del barrido automático.
 
 
@@ -136,6 +138,7 @@ class ReservationRequest(BaseModel):
     package_code: int = Field(gt=0, le=SQLITE_INTEGER_MAX)  # Exige código positivo dentro del rango entero de SQLite.
     quantity: int = Field(gt=0, le=SQLITE_INTEGER_MAX)  # Exige cupos positivos que puedan persistirse como INTEGER.
     travel_date: date  # La disponibilidad se consulta y descuenta para este día concreto.
+    notification_email: EmailStr | None = None
 
 
 class ReservationResponse(BaseModel):
@@ -259,6 +262,7 @@ def create_app(
     *,
     jwt_secret: str | None = None,
     fx_provider: Callable[[], float] = mindicador_usd_clp_provider,
+    notification_mailer: Mailer | None = None,
 ) -> FastAPI:
     """Construye e inyecta servicios locales; se usa con Uvicorn en modo factory."""
     resolved_database = Path(  # Resuelve la base configurada o la agencia.db junto al código de la aplicación.
@@ -284,6 +288,12 @@ def create_app(
         resolved_database,
         exchange_rate_provider=fx_service.get_usd_clp_rate,
     )  # Comparte la cotización cacheada al calcular y persistir reservas.
+    resolved_mailer = notification_mailer or SmtpMailer.from_environment()
+    outbox_worker = (
+        OutboxWorker(resolved_database, resolved_mailer)
+        if resolved_mailer is not None
+        else None
+    )
 
     async def payment_expiry_loop() -> None:
         """Revisa cada intervalo pagos pendientes y registra cualquier error fatal."""
@@ -297,6 +307,25 @@ def create_app(
             if expired_count:  # Evita logs repetidos cuando no había nada que vencer.
                 logger.info("Se vencieron %s pagos pendientes y se liberó su inventario.", expired_count)  # Informa el impacto del ciclo.
 
+    async def notification_outbox_loop() -> None:
+        """Despacha notificaciones reclamadas sin bloquear el servidor ASGI."""
+        if outbox_worker is None:
+            return
+        while True:
+            try:
+                result = await asyncio.to_thread(outbox_worker.process_batch)
+            except Exception:
+                logger.exception("Falló el worker de notificaciones outbox.")
+                raise
+            if result["sent"] or result["failed"] or result["dead"]:
+                logger.info(
+                    "Outbox: enviados=%s fallidos=%s definitivos=%s.",
+                    result["sent"],
+                    result["failed"],
+                    result["dead"],
+                )
+            await asyncio.sleep(NOTIFICATION_OUTBOX_POLL_SECONDS)
+
     @asynccontextmanager
     async def app_lifespan(_: FastAPI):
         """Expira pagos atrasados al iniciar y administra el worker hasta el shutdown."""
@@ -304,20 +333,37 @@ def create_app(
         if expired_count:  # Registra únicamente si el inicio recuperó capacidad retenida.
             logger.info("Al iniciar se vencieron %s pagos y se liberó su inventario.", expired_count)  # Hace visible la recuperación al operador.
         worker = asyncio.create_task(payment_expiry_loop(), name="payment-expiry-worker")  # Agenda barridos mientras el servidor está activo.
+        notification_worker_task = None
+        if outbox_worker is not None:
+            notification_worker_task = asyncio.create_task(
+                notification_outbox_loop(), name="notification-outbox-worker"
+            )
+        else:
+            logger.warning(
+                "SMTP no está configurado; las notificaciones outbox quedarán pendientes."
+            )
         try:  # Mantiene el worker vivo durante el ciclo de vida de FastAPI.
             yield  # Entrega el control al servidor y permite atender solicitudes.
         finally:  # Asegura que no quede una tarea huérfana al apagar la aplicación.
             worker.cancel()  # Solicita detener la espera o el siguiente ciclo.
+            if notification_worker_task is not None:
+                notification_worker_task.cancel()
             try:  # Espera la terminación ordenada del worker cancelado.
                 await worker  # Libera la tarea antes de cerrar el ciclo ASGI.
             except asyncio.CancelledError:  # La cancelación solicitada durante shutdown es el cierre esperado.
                 pass  # No representa un fallo del proceso.
+            if notification_worker_task is not None:
+                try:
+                    await notification_worker_task
+                except asyncio.CancelledError:
+                    pass
 
     app = FastAPI(title="Agencia de Viajes API", version="1.0.0", lifespan=app_lifespan)  # Configura limpieza de pagos en startup y shutdown.
     app.state.auth_service = auth_service  # Conserva los servicios compartidos en el estado de esta aplicación.
     app.state.rate_limiter = rate_limiter  # Evita crear una instancia distinta por cada solicitud.
     app.state.compra_service = compra_service  # Comparte la compra atómica entre solicitudes.
     app.state.fx_service = fx_service  # Comparte circuito/cache del proveedor mientras vive el proceso.
+    app.state.outbox_worker = outbox_worker
     app.state.database_path = resolved_database  # Permite a rutas y pruebas inspeccionar la ubicación activa.
     bearer_scheme = HTTPBearer(auto_error=False)  # Deja que la dependencia convierta credenciales ausentes a un 401 uniforme.
 
@@ -501,6 +547,7 @@ def create_app(
                 payload.quantity,  # Pasa la cantidad a descontar atómicamente.
                 idempotency_key,  # Permite recuperar el mismo recibo si el cliente reenvía la clave.
                 travel_date=payload.travel_date,  # Descuenta cupos únicamente para el día solicitado.
+                notification_email=str(payload.notification_email) if payload.notification_email else None,
             )  # El servicio guarda clave/huella junto al recibo y al descuento de inventario.
         except PackageNotFoundError as error:  # Mapea código inexistente a recurso no encontrado.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error  # No devuelve recibo si el paquete no existe.

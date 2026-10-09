@@ -18,6 +18,7 @@ from model.paquete_internacional import Paquete_Internacional  # Reconstruye la 
 from model.paquete_nacional import Paquete_Nacional  # Reconstruye el modelo nacional sin cambiar su fórmula.
 from model.paquete_turistico import Paquete_Turistico  # Proporciona la clase base para tipos genéricos.
 from services.auth_service import normalize_rut  # Almacena el mismo RUT canónico que usa el sistema de login.
+from services.notification_outbox import OutboxRepository
 
 SQLITE_INTEGER_MAX = 2**63 - 1  # Límite superior del entero que SQLite puede almacenar en una columna INTEGER.
 PAYMENT_PENDING_TTL_SECONDS = 15 * 60  # Retiene cupos por quince minutos mientras el pago permanece pendiente.
@@ -180,9 +181,10 @@ class CompraService:
         quantity: int,
         *,
         travel_date: date,
+        notification_email: str | None = None,
     ) -> ReservationReceipt:
         """Confirma una compra no idempotente y conserva la firma pública existente."""
-        result = self.purchase_idempotently(rut, package_code, quantity, travel_date=travel_date)  # Delega a la operación transaccional común sin clave idempotente.
+        result = self.purchase_idempotently(rut, package_code, quantity, travel_date=travel_date, notification_email=notification_email)  # Delega a la operación transaccional común sin clave idempotente.
         return result.receipt  # Conserva el tipo de retorno usado por los consumidores existentes.
 
     def purchase_idempotently(
@@ -193,6 +195,7 @@ class CompraService:
         idempotency_key: str | None = None,
         *,
         travel_date: date,
+        notification_email: str | None = None,
     ) -> IdempotentPurchaseResult:
         """Compra una sola vez por RUT/clave y reproduce el recibo en reintentos."""
         normalized_rut = normalize_rut(rut)  # Asegura que el comprador quede vinculado al RUT autenticado normalizado.
@@ -202,7 +205,12 @@ class CompraService:
             raise ValueError("La cantidad debe ser un entero positivo válido para SQLite.")  # Impide reservas vacías, negativas o fuera de rango.
         normalized_key = self._normalize_idempotency_key(idempotency_key)  # Valida y canoniza la clave opcional antes de acceder a SQLite.
         normalized_travel_date = self._normalize_travel_date(travel_date)  # Hace que la fecha de viaje forme parte del contrato persistido.
-        request_hash = hashlib.sha256(f"{package_code}:{quantity}:{normalized_travel_date}".encode("ascii")).hexdigest() if normalized_key else None  # Vincula idempotencia también a la fecha solicitada.
+        request_material = f"{package_code}:{quantity}:{normalized_travel_date}"  # Conserva la huella histórica cuando no se solicita notificación.
+        if notification_email is not None:
+            if not isinstance(notification_email, str) or not notification_email.strip():
+                raise ValueError("notification_email debe ser una dirección no vacía.")
+            request_material += f":{notification_email.strip().casefold()}"
+        request_hash = hashlib.sha256(request_material.encode("utf-8")).hexdigest() if normalized_key else None  # Vincula la clave también a la dirección de notificación.
 
         if normalized_key is not None:
             previous = self._find_reservation_by_key(normalized_rut, normalized_key)  # Evita consultar FX en reintentos ya completados.
@@ -215,7 +223,7 @@ class CompraService:
 
         for attempt in range(1, self._max_write_attempts + 1):  # Ejecuta el número de intentos acotado por configuración.
             try:  # Repite la transacción completa solo para bloqueos SQLite transitorios.
-                receipt, replayed = self._purchase_once(normalized_rut, package_code, quantity, normalized_travel_date, exchange_rate, normalized_key, request_hash)  # Ejecuta una transacción indivisible o recupera el resultado anterior.
+                receipt, replayed = self._purchase_once(normalized_rut, package_code, quantity, normalized_travel_date, exchange_rate, normalized_key, request_hash, notification_email)  # Ejecuta una transacción indivisible o recupera el resultado anterior.
                 return IdempotentPurchaseResult(receipt=receipt, replayed=replayed)  # Devuelve el recibo junto a su estado de repetición.
             except sqlite3.OperationalError as error:  # Distingue los bloqueos transitorios de otros errores de SQL.
                 if not self._is_database_locked(error):  # No reintenta sintaxis SQL ni otros OperationalError permanentes.
@@ -237,6 +245,7 @@ class CompraService:
         exchange_rate: float | None,
         idempotency_key: str | None,
         request_hash: str | None,
+        notification_email: str | None,
     ) -> tuple[ReservationReceipt, bool]:
         """Realiza una transacción de compra o lee la reserva ya confirmada."""
         reservation_id = str(uuid.uuid4())  # Genera un UUID distinto para una nueva compra; no se usa al reproducir.
@@ -315,11 +324,11 @@ class CompraService:
                     INSERT INTO reservas (
                         reservation_id, rut, package_code, quantity,
                         unit_price, total_price, travel_date, exchange_rate_applied, created_at,
-                        idempotency_key, request_hash
+                        idempotency_key, request_hash, notification_email
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (reservation_id, normalized_rut, package_code, quantity, unit_price, total_price, travel_date, exchange_rate, created_at, idempotency_key, request_hash),  # Conserva viaje, precio y tasa aplicada para auditoría.
+                    (reservation_id, normalized_rut, package_code, quantity, unit_price, total_price, travel_date, exchange_rate, created_at, idempotency_key, request_hash, notification_email),  # Conserva viaje, precio y notificación solicitada para auditoría.
                 )  # La referencia al catálogo impide reservas de paquetes inexistentes.
                 connection.execute(  # Abre un pago local pendiente en la misma transacción que retiene los cupos.
                     """
@@ -330,6 +339,20 @@ class CompraService:
                     """,
                     (payment_id, reservation_id, round(total_price * 0.5, 2), created_at, created_at, expires_at),  # Abre el anticipo mínimo del 50 % y fija su plazo.
                 )  # Un fallo al insertar el pago revierte también la reserva y la retención de inventario.
+                if notification_email is not None:
+                    OutboxRepository.enqueue(
+                        connection,
+                        event_key=f"reservation-created:{reservation_id}",
+                        payload={
+                            "recipient": notification_email,
+                            "subject": f"Reserva {reservation_id} recibida",
+                            "body": (
+                                f"Tu reserva {reservation_id} fue recibida. "
+                                f"El pago inicial está pendiente hasta {expires_at}."
+                            ),
+                        },
+                        created_at=created_at,
+                    )
                 connection.commit()  # Confirma cupos, recibo y clave idempotente como una sola unidad.
             except Exception:  # Revierte dominio, persistencia u otros errores ocurridos antes del commit.
                 connection.rollback()  # Evita reservar cupos sin un recibo/clave confirmados.
@@ -1046,6 +1069,7 @@ class CompraService:
                         travel_date TEXT NOT NULL DEFAULT 'legacy',
                         exchange_rate_applied REAL,
                         created_at TEXT NOT NULL,
+                        notification_email TEXT,
                         idempotency_key TEXT,
                         request_hash TEXT,
                         status TEXT NOT NULL DEFAULT 'confirmed'
@@ -1071,6 +1095,8 @@ class CompraService:
                     connection.execute("ALTER TABLE reservas ADD COLUMN travel_date TEXT NOT NULL DEFAULT 'legacy'")
                 if "exchange_rate_applied" not in existing_columns:
                     connection.execute("ALTER TABLE reservas ADD COLUMN exchange_rate_applied REAL")
+                if "notification_email" not in existing_columns:
+                    connection.execute("ALTER TABLE reservas ADD COLUMN notification_email TEXT")
                 connection.execute(  # Crea el índice único que respalda la idempotencia dentro de reservas.
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS uq_reservas_rut_idempotency
@@ -1190,3 +1216,4 @@ class CompraService:
                     )
                     """
                 )  # Conserva la semántica previa de reservas existentes como compras completadas o canceladas.
+                OutboxRepository.ensure_schema(connection)
