@@ -300,18 +300,21 @@ fallo de persistencia. Si se agotan los intentos, la API responde `503` y
 `Retry-After: 1`; si el cliente usa clave idempotente, debe conservarla al
 reintentar.
 
-Las pruebas locales de FX y rate limiter están en
-`tests/test_blindaje_completo.py`; las pruebas de API, autenticación y compra
-están en `tests/test_api_local.py`; los escenarios de idempotencia, expiración
-de JWT, bloqueos SQLite, ciclo de vida de reservas y pagos locales están en
-`tests/test_api_edge_cases.py`. Ejecuta las tres suites con:
+Instala las dependencias de ejecución y desarrollo con:
 
 ```powershell
-python -m unittest discover -s tests -v
+python -m pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-Este checkout no contiene una suite previa de 161 pruebas, por lo que no es
-posible certificar su estado.
+Ejecuta toda la suite desde la raíz con cualquiera de estos comandos:
+
+```powershell
+python -m pytest
+pytest
+```
+
+`pytest.ini` configura la ruta raíz para ambos comandos. GitHub Actions ejecuta
+la misma suite al subir cambios a `main` y en cada pull request.
 
 ## Bitácora de Avances
 
