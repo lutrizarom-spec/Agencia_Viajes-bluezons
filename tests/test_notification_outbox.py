@@ -9,6 +9,7 @@ import unittest
 from contextlib import closing
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from dao.paquete_dao import PaqueteDao
 from model.paquete_nacional import Paquete_Nacional
@@ -21,6 +22,7 @@ from services.notification_outbox import (
     MailDeliveryError,
     OutboxRepository,
     OutboxWorker,
+    SmtpMailer,
 )
 
 
@@ -180,6 +182,24 @@ class NotificationOutboxTests(unittest.TestCase):
                 6000,
                 idempotency_key="payment-attempt-1",
             )
+
+
+class SmtpConfigurationTests(unittest.TestCase):
+    def test_smtp_timeout_must_be_finite_and_positive(self) -> None:
+        for timeout in (0, float("inf"), float("-inf"), float("nan")):
+            with self.subTest(timeout=timeout):
+                with self.assertRaises(ValueError):
+                    SmtpMailer(host="smtp.example.com", sender="agency@example.com", timeout=timeout)
+
+    def test_invalid_tls_mode_fails_fast(self) -> None:
+        environment = {
+            "AGENCIA_SMTP_HOST": "smtp.example.com",
+            "AGENCIA_SMTP_SENDER": "agency@example.com",
+            "AGENCIA_SMTP_USE_SSL": "maybe",
+        }
+        with patch.dict("os.environ", environment, clear=True):
+            with self.assertRaisesRegex(ValueError, "AGENCIA_SMTP_USE_SSL"):
+                SmtpMailer.from_environment()
 
 
 if __name__ == "__main__":

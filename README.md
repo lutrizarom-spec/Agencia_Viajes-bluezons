@@ -260,6 +260,9 @@ causar un correo repetido.
 Configura `AGENCIA_SMTP_HOST` y `AGENCIA_SMTP_SENDER`; opcionalmente
 `AGENCIA_SMTP_PORT` (587), `AGENCIA_SMTP_USERNAME`,
 `AGENCIA_SMTP_PASSWORD`, `AGENCIA_SMTP_USE_SSL` y `AGENCIA_SMTP_TIMEOUT` (10).
+`AGENCIA_SMTP_USE_SSL` acepta `true`/`false`, `yes`/`no` o `1`/`0`; puerto y
+timeout fuera de rango, no finitos o con valores de modo inválidos hacen fallar
+la configuración al iniciar, en vez de degradarla silenciosamente.
 El servidor inicia sin SMTP, pero deja las notificaciones en cola y registra
 una advertencia. No se almacenan credenciales SMTP en SQLite ni en el código.
 

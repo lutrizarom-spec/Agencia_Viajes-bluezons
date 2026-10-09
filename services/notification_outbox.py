@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import smtplib
 import sqlite3
 import ssl
@@ -62,7 +63,15 @@ class SmtpMailer:
             raise ValueError("SMTP_HOST y SMTP_SENDER son obligatorios.")
         if (username is None) != (password is None):
             raise ValueError("SMTP_USERNAME y SMTP_PASSWORD deben configurarse juntos.")
-        if not 1 <= port <= 65535 or timeout <= 0:
+        if (
+            isinstance(port, bool)
+            or not isinstance(port, int)
+            or not 1 <= port <= 65535
+            or isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
             raise ValueError("El puerto o timeout SMTP no es válido.")
         self.host = host
         self.port = port
@@ -115,9 +124,10 @@ class SmtpMailer:
             timeout = float(environ.get("AGENCIA_SMTP_TIMEOUT", "10"))
         except ValueError as error:
             raise ValueError("AGENCIA_SMTP_PORT/TIMEOUT deben ser numéricos.") from error
-        use_ssl = environ.get("AGENCIA_SMTP_USE_SSL", "false").lower() in {
-            "1", "true", "yes"
-        }
+        raw_use_ssl = environ.get("AGENCIA_SMTP_USE_SSL", "false").lower()
+        if raw_use_ssl not in {"1", "true", "yes", "0", "false", "no"}:
+            raise ValueError("AGENCIA_SMTP_USE_SSL debe ser true/false, yes/no o 1/0.")
+        use_ssl = raw_use_ssl in {"1", "true", "yes"}
         return cls(
             host=host,
             sender=sender,
