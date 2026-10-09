@@ -216,6 +216,16 @@ inmediatamente los vencimientos ocurridos mientras estaba detenida. Los
 errores del worker quedan registrados y las transiciones manuales también
 ejecutan primero un barrido para impedir confirmar un pago vencido.
 
+### Precisión monetaria
+
+Los importes de reservas y pagos se calculan y persisten como centésimos
+enteros (`*_minor`); se redondean a dos decimales con `ROUND_HALF_UP`. Las
+columnas `REAL` anteriores se conservan por compatibilidad, pero no se usan
+para calcular saldos. Al iniciar, las bases existentes reciben las nuevas
+columnas y sus importes se convierten con `Decimal`; valores que no caben en el
+formato o son menores a un centésimo fallan explícitamente. Las respuestas HTTP
+siguen exponiendo importes JSON numéricos.
+
 ### Notificaciones por correo con outbox
 
 `POST /reservas` acepta `notification_email` opcional. Si se entrega, la reserva

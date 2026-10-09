@@ -4,6 +4,7 @@ import asyncio  # Ejecuta limpieza periódica en el ciclo asíncrono sin bloquea
 import logging  # Registra fallos del worker de expiración en vez de ocultarlos.
 import os  # Lee configuración local del entorno sin almacenar secretos en el repositorio.
 import sqlite3  # Inicializa el esquema del catálogo en el archivo SQLite configurado.
+from decimal import Decimal
 from contextlib import asynccontextmanager, closing  # Administra vida de app y cierra conexiones SQLite.
 from collections.abc import Callable  # Tipifica el proveedor FX inyectable sin acoplar la API a una implementación.
 from datetime import date  # Valida y transporta la fecha solicitada para el viaje.
@@ -19,6 +20,7 @@ from model.paquete_crucero import Paquete_Crucero  # Calcula precio del subtipo 
 from model.paquete_internacional import Paquete_Internacional  # Calcula precio internacional mediante su modelo existente.
 from model.paquete_nacional import Paquete_Nacional  # Calcula precio nacional mediante su modelo existente.
 from model.paquete_turistico import Paquete_Turistico  # Proporciona precio base para filas genéricas antiguas.
+from model.money import from_minor_units, to_minor_units
 from services.auth_service import (  # Importa autenticación, normalización y errores de credenciales.
     AuthService,
     InvalidCredentialsError,
@@ -175,7 +177,7 @@ class PaymentCreateRequest(BaseModel):
     """Monto de un abono adicional al anticipo inicial."""
 
     model_config = ConfigDict(extra="forbid")
-    amount: float = Field(gt=0, allow_inf_nan=False)
+    amount: Decimal = Field(gt=0)
 
 
 class PaymentResponse(BaseModel):
@@ -251,7 +253,9 @@ def _admin_package_response(row: tuple[object, ...]) -> AdminPackageResponse:
         duracion=package.duracion,  # Devuelve los días del viaje.
         tipo=tipo,  # Indica el subtipo guardado.
         precio_base=package.precio_base,  # Expone el precio base validado.
-        precio_por_persona=package.calcular_precio(),  # Reutiliza el cálculo del mismo modelo.
+        precio_por_persona=float(
+            from_minor_units(to_minor_units(package.calcular_precio()))
+        ),  # Presenta el mismo importe redondeado que guardaría una compra.
         pasaporte_valido=bool(row[5]) if tipo == "internacional" else None,  # Convierte el INTEGER solo cuando es atributo aplicable.
         impuesto_puerto=row[6] if tipo == "crucero" else None,  # Expone el impuesto únicamente a cruceros.
         activo=bool(row[7]),  # Convierte la bandera SQLite a booleano HTTP.
@@ -420,6 +424,7 @@ def create_app(
                     price = package.calcular_precio()
             except FxServiceError as error:
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
+            price = float(from_minor_units(to_minor_units(price)))
             response.append(  # Añade los datos públicos, precio y cupos conocidos.
                 PackageResponse(
                     codigo=package.codigo,  # Conserva la clave existente del catálogo.

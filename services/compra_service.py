@@ -10,6 +10,7 @@ import uuid  # Genera identificadores no predecibles para cada reserva.
 from contextlib import closing  # Garantiza el cierre de conexiones SQLite.
 from dataclasses import dataclass  # Define el resultado de compra como un valor inmutable.
 from datetime import date, datetime, timedelta, timezone  # Registra fecha de viaje y timestamps de pagos en UTC.
+from decimal import Decimal
 from pathlib import Path  # Acepta rutas locales de base de datos.
 from collections.abc import Callable  # Tipifica el proveedor de tasa de cambio inyectado desde FxService.
 
@@ -17,6 +18,7 @@ from model.paquete_crucero import Paquete_Crucero  # Reconstruye la regla existe
 from model.paquete_internacional import Paquete_Internacional  # Reconstruye la regla existente de precio internacional.
 from model.paquete_nacional import Paquete_Nacional  # Reconstruye el modelo nacional sin cambiar su fórmula.
 from model.paquete_turistico import Paquete_Turistico  # Proporciona la clase base para tipos genéricos.
+from model.money import MAX_MINOR_UNITS, from_minor_units, half_up_minor_units, to_minor_units
 from services.auth_service import normalize_rut  # Almacena el mismo RUT canónico que usa el sistema de login.
 from services.notification_outbox import OutboxRepository
 
@@ -270,7 +272,8 @@ class CompraService:
                                (SELECT p.payment_id FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
                                (SELECT CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
                                (SELECT p.expires_at FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
-                               COALESCE((SELECT SUM(p.amount) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0)
+                               COALESCE((SELECT SUM(p.amount_minor) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0),
+                               r.total_price_minor, r.unit_price_minor
                         FROM reservas AS r
                         WHERE r.rut = ? AND r.idempotency_key = ?
                         """,
@@ -304,12 +307,15 @@ class CompraService:
                     raise InsufficientCapacityError("No hay cupos suficientes para la cantidad solicitada.")  # No genera recibo ni descuento.
 
                 package = self._build_package(package_row)  # Reconstruye subtipo y conserva la regla de precio actual.
-                unit_price = package.calcular_precio(exchange_rate) if exchange_rate is not None else package.calcular_precio()  # Congela la tasa FX en el precio unitario cuando el subtipo la necesita.
-                if not math.isfinite(unit_price) or unit_price <= 0:  # Evita almacenar tasas/valores no finitos o no positivos.
+                raw_unit_price = package.calcular_precio(exchange_rate) if exchange_rate is not None else package.calcular_precio()  # Congela la tasa FX en el precio unitario cuando el subtipo la necesita.
+                if not math.isfinite(raw_unit_price) or raw_unit_price <= 0:  # Evita almacenar tasas/valores no finitos o no positivos.
                     raise InvalidPackagePriceError("El paquete tiene un precio inválido para la compra.")  # No cambia fórmulas de dominio.
-                total_price = unit_price * quantity  # Calcula el monto que queda persistido en el recibo.
-                if not math.isfinite(total_price) or total_price <= 0:  # Comprueba overflow y validez antes de enlazarlo a SQLite.
+                unit_price_minor = to_minor_units(raw_unit_price)
+                total_price_minor = unit_price_minor * quantity
+                if unit_price_minor <= 0 or total_price_minor > MAX_MINOR_UNITS:
                     raise InvalidPackagePriceError("El precio total de la compra no es válido.")  # Evita persistir un importe corrupto.
+                unit_price = float(from_minor_units(unit_price_minor))
+                total_price = float(from_minor_units(total_price_minor))
 
                 updated = connection.execute(  # Descuenta cupos mediante una condición atómica de capacidad disponible.
                     """
@@ -327,21 +333,23 @@ class CompraService:
                     """
                     INSERT INTO reservas (
                         reservation_id, rut, package_code, quantity,
-                        unit_price, total_price, travel_date, exchange_rate_applied, created_at,
+                        unit_price, total_price, unit_price_minor, total_price_minor,
+                        travel_date, exchange_rate_applied, created_at,
                         idempotency_key, request_hash, notification_email
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (reservation_id, normalized_rut, package_code, quantity, unit_price, total_price, travel_date, exchange_rate, created_at, idempotency_key, request_hash, notification_email),  # Conserva viaje, precio y notificación solicitada para auditoría.
+                    (reservation_id, normalized_rut, package_code, quantity, unit_price, total_price, unit_price_minor, total_price_minor, travel_date, exchange_rate, created_at, idempotency_key, request_hash, notification_email),  # Conserva importes exactos, viaje y notificación para auditoría.
                 )  # La referencia al catálogo impide reservas de paquetes inexistentes.
                 connection.execute(  # Abre un pago local pendiente en la misma transacción que retiene los cupos.
                     """
                     INSERT INTO payments (
-                        payment_id, reservation_id, amount, status, created_at, updated_at, expires_at
+                        payment_id, reservation_id, amount, amount_minor, status,
+                        created_at, updated_at, expires_at
                     )
-                    VALUES (?, ?, ?, 'pending', ?, ?, ?)
+                    VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
                     """,
-                    (payment_id, reservation_id, round(total_price * 0.5, 2), created_at, created_at, expires_at),  # Abre el anticipo mínimo del 50 % y fija su plazo.
+                    (payment_id, reservation_id, float(from_minor_units(half_up_minor_units(total_price_minor))), half_up_minor_units(total_price_minor), created_at, created_at, expires_at),  # Abre el anticipo mínimo del 50 % con redondeo decimal explícito.
                 )  # Un fallo al insertar el pago revierte también la reserva y la retención de inventario.
                 if notification_email is not None:
                     OutboxRepository.enqueue(
@@ -413,7 +421,8 @@ class CompraService:
                    (SELECT p.payment_id FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
                    (SELECT CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
                    (SELECT p.expires_at FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
-                   COALESCE((SELECT SUM(p.amount) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0)
+                   COALESCE((SELECT SUM(p.amount_minor) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0),
+                   r.total_price_minor, r.unit_price_minor
             FROM reservas AS r
             WHERE r.rut = ? AND r.idempotency_key = ?
         """
@@ -435,7 +444,8 @@ class CompraService:
                    (SELECT p.payment_id FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
                    (SELECT CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
                    (SELECT p.expires_at FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
-                   COALESCE((SELECT SUM(p.amount) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0)
+                   COALESCE((SELECT SUM(p.amount_minor) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0),
+                   r.total_price_minor, r.unit_price_minor
             FROM reservas AS r
             WHERE r.reservation_id = ?
             """,
@@ -464,11 +474,11 @@ class CompraService:
             package_code=int(row[2]),  # Recupera el código de catálogo.
             quantity=int(row[3]),  # Recupera la cantidad original comprada.
             travel_date=str(row[10]),  # Recupera la fecha de viaje usada para retener cupos.
-            unit_price=float(row[4]),  # Recupera el precio unitario acordado.
-            total_price=float(row[5]),  # Recupera el total original, sin recalcularlo con precios actuales.
+            unit_price=float(from_minor_units(int(row[17]))),  # Recupera el precio unitario desde centésimos enteros.
+            total_price=float(from_minor_units(int(row[16]))),  # Recupera el total original sin cálculos binarios.
             exchange_rate_applied=None if row[11] is None else float(row[11]),  # Recupera la tasa aplicada, si correspondía.
-            total_paid=float(row[15]),  # Suma únicamente los pagos confirmados.
-            balance_due=max(0.0, float(row[5]) - float(row[15])),  # Limita el saldo pendiente a cero ante diferencias de redondeo.
+            total_paid=float(from_minor_units(int(row[15]))),  # Suma únicamente pagos confirmados en centésimos.
+            balance_due=float(from_minor_units(max(0, int(row[16]) - int(row[15])))),  # Calcula el saldo con enteros, sin tolerancias flotantes.
             created_at=str(row[6]),  # Recupera la fecha de confirmación original.
             status=str(row[7]),  # Recupera estado actual: confirmado o cancelado.
             cancelled_at=None if row[8] is None else str(row[8]),  # Conserva fecha de cancelación cuando existe.
@@ -534,7 +544,8 @@ class CompraService:
                    (SELECT p.payment_id FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
                    (SELECT CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
                    (SELECT p.expires_at FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
-                   COALESCE((SELECT SUM(p.amount) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0)
+                   COALESCE((SELECT SUM(p.amount_minor) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0),
+                   r.total_price_minor, r.unit_price_minor
             FROM reservas AS r
         """
         if rut is None:  # None se reserva para el endpoint administrativo que ya validó rol.
@@ -594,7 +605,8 @@ class CompraService:
                            (SELECT p.payment_id FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
                            (SELECT CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
                            (SELECT p.expires_at FROM payments AS p WHERE p.reservation_id = r.reservation_id ORDER BY p.created_at DESC, p.payment_id DESC LIMIT 1),
-                           COALESCE((SELECT SUM(p.amount) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0)
+                           COALESCE((SELECT SUM(p.amount_minor) FROM payments AS p WHERE p.reservation_id = r.reservation_id AND p.status = 'confirmed'), 0),
+                           r.total_price_minor, r.unit_price_minor
                     FROM reservas AS r
                     WHERE r.reservation_id = ?
                     """,
@@ -663,7 +675,7 @@ class CompraService:
         with closing(self._connect()) as connection:  # Abre una conexión de solo lectura para el estado persistido.
             row = connection.execute(  # Obtiene pago y propietario en una consulta para no filtrar reservas ajenas.
                 """
-                SELECT p.payment_id, p.reservation_id, p.amount,
+                SELECT p.payment_id, p.reservation_id, p.amount_minor,
                        CASE WHEN p.expired_at IS NOT NULL THEN 'expired' ELSE p.status END,
                        p.created_at, p.updated_at, r.rut, p.expires_at
                 FROM payments AS p
@@ -697,7 +709,7 @@ class CompraService:
                 raise ReservationNotFoundError("No se encontró una reserva accesible.")
             rows = connection.execute(
                 """
-                SELECT payment_id, reservation_id, amount,
+                SELECT payment_id, reservation_id, amount_minor,
                        CASE WHEN expired_at IS NOT NULL THEN 'expired' ELSE status END,
                        created_at, updated_at, expires_at
                 FROM payments
@@ -712,7 +724,7 @@ class CompraService:
         self,
         reservation_id: str,
         rut: str,
-        amount: float,
+        amount: float | Decimal,
         *,
         is_admin: bool = False,
         idempotency_key: str | None = None,
@@ -720,9 +732,12 @@ class CompraService:
         """Crea un pago parcial dentro del saldo, con un único intento pendiente."""
         self.expire_pending_payments()
         normalized_rut = normalize_rut(rut)
-        if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not math.isfinite(amount) or amount <= 0:
+        if isinstance(amount, bool) or not isinstance(amount, (int, float, Decimal)):
             raise ValueError("El monto del pago debe ser finito y mayor que cero.")
         normalized_key = self._normalize_idempotency_key(idempotency_key)
+        amount_minor = to_minor_units(amount)
+        if amount_minor == 0:
+            raise ValueError("El monto del pago debe ser al menos un centésimo.")
         request_hash = (
             hashlib.sha256(format(float(amount), ".17g").encode("ascii")).hexdigest()
             if normalized_key is not None
@@ -735,8 +750,8 @@ class CompraService:
             try:
                 reservation = connection.execute(
                     """
-                    SELECT rut, total_price, status,
-                           COALESCE((SELECT SUM(amount) FROM payments
+                    SELECT rut, total_price_minor, status,
+                           COALESCE((SELECT SUM(amount_minor) FROM payments
                                      WHERE reservation_id = reservas.reservation_id
                                        AND status = 'confirmed'), 0),
                            EXISTS(SELECT 1 FROM payments
@@ -752,7 +767,7 @@ class CompraService:
                 if normalized_key is not None:
                     previous = connection.execute(
                         """
-                        SELECT payment_id, reservation_id, amount, status,
+                        SELECT payment_id, reservation_id, amount_minor, status,
                                created_at, updated_at, expires_at, request_hash
                         FROM payments
                         WHERE reservation_id = ? AND idempotency_key = ?
@@ -770,24 +785,25 @@ class CompraService:
                     raise PaymentTransitionConflictError("La reserva no está activa para recibir pagos.")
                 if reservation[4]:
                     raise PaymentTransitionConflictError("La reserva ya tiene un pago pendiente.")
-                balance_due = float(reservation[1]) - float(reservation[3])
-                if amount > balance_due + 1e-9:
+                balance_due_minor = int(reservation[1]) - int(reservation[3])
+                if amount_minor > balance_due_minor:
                     raise ValueError("El monto supera el saldo pendiente de la reserva.")
                 payment_id = str(uuid.uuid4())
                 timestamp = now.isoformat()
                 connection.execute(
                     """
                     INSERT INTO payments (
-                        payment_id, reservation_id, amount, status,
+                        payment_id, reservation_id, amount, amount_minor, status,
                         created_at, updated_at, expires_at,
                         idempotency_key, request_hash
                     )
-                    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
                     """,
                     (
                         payment_id,
                         reservation_id,
-                        float(amount),
+                        float(from_minor_units(amount_minor)),
+                        amount_minor,
                         timestamp,
                         timestamp,
                         expires_at,
@@ -802,7 +818,7 @@ class CompraService:
         return PaymentReceipt(
             payment_id=payment_id,
             reservation_id=reservation_id,
-            amount=float(amount),
+            amount=float(from_minor_units(amount_minor)),
             status="pending",
             created_at=timestamp,
             updated_at=timestamp,
@@ -840,7 +856,7 @@ class CompraService:
                     """
                     SELECT p.payment_id, p.reservation_id, r.package_code, r.quantity,
                            r.travel_date,
-                           COALESCE((SELECT SUM(paid.amount) FROM payments AS paid
+                           COALESCE((SELECT SUM(paid.amount_minor) FROM payments AS paid
                                      WHERE paid.reservation_id = r.reservation_id
                                        AND paid.status = 'confirmed'), 0)
                     FROM payments AS p
@@ -934,14 +950,14 @@ class CompraService:
             try:  # Mantiene pagos, reserva e inventario sincronizados frente a cualquier error.
                 row = connection.execute(  # Lee el estado de pago y los datos requeridos para su transición.
                     """
-                    SELECT p.payment_id, p.reservation_id, p.amount, p.status,
+                    SELECT p.payment_id, p.reservation_id, p.amount_minor, p.status,
                            p.created_at, p.updated_at, r.package_code,
                            r.quantity, r.status, p.expires_at, p.expired_at,
                            r.travel_date,
-                           COALESCE((SELECT SUM(paid.amount) FROM payments AS paid
+                           COALESCE((SELECT SUM(paid.amount_minor) FROM payments AS paid
                                      WHERE paid.reservation_id = r.reservation_id
                                        AND paid.status = 'confirmed'), 0),
-                           r.total_price
+                           r.total_price_minor
                     FROM payments AS p
                     JOIN reservas AS r ON r.reservation_id = p.reservation_id
                     WHERE p.reservation_id = ?
@@ -963,7 +979,7 @@ class CompraService:
                     raise PaymentTransitionConflictError("El pago ya fue resuelto y no admite otra transición.")  # Evita confirmar pagos fallidos o fallar pagos confirmados.
                 if row[8] != "confirmed":  # La reserva debe seguir activa para poder cerrar el pago.
                     raise PaymentTransitionConflictError("La reserva no está activa para resolver su pago.")  # Evita resolver pagos de reservas canceladas.
-                if target_status == "confirmed" and float(row[12]) + float(row[2]) > float(row[13]) + 1e-9:
+                if target_status == "confirmed" and int(row[12]) + int(row[2]) > int(row[13]):
                     raise PaymentTransitionConflictError("El pago superaría el total de la reserva.")
 
                 now = datetime.now(timezone.utc).isoformat()  # Conserva la transición con fecha UTC auditable.
@@ -1004,7 +1020,7 @@ class CompraService:
                 return PaymentReceipt(  # Construye la respuesta del resultado recién confirmado.
                     payment_id=str(row[0]),  # Conserva el identificador del pago existente.
                     reservation_id=str(row[1]),  # Vincula la respuesta a la reserva.
-                    amount=float(row[2]),  # Devuelve el monto congelado, no una nueva cotización.
+                    amount=float(from_minor_units(int(row[2]))),  # Devuelve el monto exacto, no una nueva cotización.
                     status=target_status,  # Refleja el nuevo resultado local.
                     created_at=str(row[4]),  # Conserva la creación original.
                     updated_at=now,  # Informa el timestamp UTC del cambio.
@@ -1023,7 +1039,7 @@ class CompraService:
         return PaymentReceipt(  # Normaliza tipos SQLite para el servicio y la API.
             payment_id=str(row[0]),  # Entrega el identificador local del pago.
             reservation_id=str(row[1]),  # Entrega el UUID de reserva relacionado.
-            amount=float(row[2]),  # Expone el monto total original de la reserva.
+            amount=float(from_minor_units(int(row[2]))),  # Expone el monto persistido como centésimos enteros.
             status=str(row[3]),  # Expone el estado local actual.
             created_at=str(row[4]),  # Expone el instante de creación.
             updated_at=str(row[5]),  # Expone el último cambio de estado.
@@ -1104,6 +1120,8 @@ class CompraService:
                         quantity INTEGER NOT NULL CHECK (quantity > 0),
                         unit_price REAL NOT NULL CHECK (unit_price > 0),
                         total_price REAL NOT NULL CHECK (total_price > 0),
+                        unit_price_minor INTEGER NOT NULL CHECK (unit_price_minor > 0),
+                        total_price_minor INTEGER NOT NULL CHECK (total_price_minor > 0),
                         travel_date TEXT NOT NULL DEFAULT 'legacy',
                         exchange_rate_applied REAL,
                         created_at TEXT NOT NULL,
@@ -1135,6 +1153,31 @@ class CompraService:
                     connection.execute("ALTER TABLE reservas ADD COLUMN exchange_rate_applied REAL")
                 if "notification_email" not in existing_columns:
                     connection.execute("ALTER TABLE reservas ADD COLUMN notification_email TEXT")
+                if "unit_price_minor" not in existing_columns:
+                    connection.execute("ALTER TABLE reservas ADD COLUMN unit_price_minor INTEGER")
+                if "total_price_minor" not in existing_columns:
+                    connection.execute("ALTER TABLE reservas ADD COLUMN total_price_minor INTEGER")
+                legacy_prices = connection.execute(
+                    """
+                    SELECT reservation_id, unit_price, total_price,
+                           unit_price_minor, total_price_minor
+                    FROM reservas
+                    WHERE unit_price_minor IS NULL OR total_price_minor IS NULL
+                    """
+                ).fetchall()
+                for reservation_id, unit_price, total_price, unit_minor, total_minor in legacy_prices:
+                    connection.execute(
+                        """
+                        UPDATE reservas
+                        SET unit_price_minor = ?, total_price_minor = ?
+                        WHERE reservation_id = ?
+                        """,
+                        (
+                            unit_minor if unit_minor is not None else to_minor_units(unit_price),
+                            total_minor if total_minor is not None else to_minor_units(total_price),
+                            reservation_id,
+                        ),
+                    )
                 connection.execute(  # Crea el índice único que respalda la idempotencia dentro de reservas.
                     """
                     CREATE UNIQUE INDEX IF NOT EXISTS uq_reservas_rut_idempotency
@@ -1148,6 +1191,7 @@ class CompraService:
                         payment_id TEXT PRIMARY KEY,
                         reservation_id TEXT NOT NULL,
                         amount REAL NOT NULL CHECK (amount > 0),
+                        amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
                         status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'failed')),
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
@@ -1172,6 +1216,16 @@ class CompraService:
                     connection.execute("ALTER TABLE payments ADD COLUMN idempotency_key TEXT")
                 if "request_hash" not in payment_columns:
                     connection.execute("ALTER TABLE payments ADD COLUMN request_hash TEXT")
+                if "amount_minor" not in payment_columns:
+                    connection.execute("ALTER TABLE payments ADD COLUMN amount_minor INTEGER")
+                legacy_amounts = connection.execute(
+                    "SELECT payment_id, amount FROM payments WHERE amount_minor IS NULL"
+                ).fetchall()
+                for payment_id, amount in legacy_amounts:
+                    connection.execute(
+                        "UPDATE payments SET amount_minor = ? WHERE payment_id = ?",
+                        (to_minor_units(amount), payment_id),
+                    )
                 pending_without_deadline = connection.execute(
                     "SELECT payment_id, status, created_at FROM payments WHERE expires_at IS NULL"
                 ).fetchall()
@@ -1204,6 +1258,7 @@ class CompraService:
                             payment_id TEXT PRIMARY KEY,
                             reservation_id TEXT NOT NULL,
                             amount REAL NOT NULL CHECK (amount > 0),
+                            amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
                             status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'failed')),
                             created_at TEXT NOT NULL,
                             updated_at TEXT NOT NULL,
@@ -1219,11 +1274,11 @@ class CompraService:
                     connection.execute(
                         """
                         INSERT INTO payments (
-                            payment_id, reservation_id, amount, status,
+                            payment_id, reservation_id, amount, amount_minor, status,
                             created_at, updated_at, expires_at, expired_at,
                             idempotency_key, request_hash
                         )
-                        SELECT payment_id, reservation_id, amount, status,
+                        SELECT payment_id, reservation_id, amount, amount_minor, status,
                                created_at, updated_at, expires_at, expired_at,
                                idempotency_key, request_hash
                         FROM payments_legacy_unique
@@ -1253,13 +1308,14 @@ class CompraService:
                 connection.execute(  # Migra reservas anteriores como pagos históricos ya resueltos y no retiene inventario adicional.
                     """
                     INSERT INTO payments (
-                        payment_id, reservation_id, amount, status, created_at,
+                        payment_id, reservation_id, amount, amount_minor, status, created_at,
                         updated_at, expires_at, expired_at
                     )
                     SELECT
                         'legacy-' || r.reservation_id,
                         r.reservation_id,
                         r.total_price,
+                        r.total_price_minor,
                         CASE WHEN r.status = 'cancelled' THEN 'failed' ELSE 'confirmed' END,
                         r.created_at,
                         COALESCE(r.cancelled_at, r.created_at),
