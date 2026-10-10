@@ -43,5 +43,5 @@ API REST local (FastAPI + SQLite), modelo POO/DAO y menú de consola. Sin cloud 
 - No agregar dependencias sin autorización.
 
 ## Git
-- Rama actual: `fix/errores-sqlite-cache`. No commit, push ni cambio de rama sin autorización.
+- No commit, push ni cambio de rama sin autorización.
 - El árbol puede mostrar decenas de archivos «modificados» solo por fin de línea (CRLF). Para ver cambios reales usa `git diff --ignore-space-at-eol --stat`. No normalices fin de línea ni «arregles» esos archivos sin permiso.
