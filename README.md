@@ -1,11 +1,11 @@
 # Agencia de Viajes - Sistema de Gestión (POO & DAO)
 
-Demostración automática del modelo de clases de una agencia de viajes. `main.py` usa únicamente la biblioteca estándar y los modelos del proyecto; no depende de la API, DAO, SQLite ni servicios externos. Las capas de API y persistencia siguen disponibles por separado.
+Aplicación de consola de una agencia de viajes. `main.py` presenta un menú interactivo para crear, listar, modificar y dar de baja paquetes usando `PaqueteDao` y SQLite, e incluye como opción la demostración automática del modelo de clases. Las capas de API y servicios siguen disponibles por separado en `main_api.py`.
 
 ## Arquitectura
 
 - **Modelo:** `Paquete_Turistico` contiene los datos comunes y los subtipos especializan su cálculo. `Cliente` hereda los datos comunes de `Persona`. `Reserva` recibe objetos `Cliente` y `Paquete_Turistico` existentes y crea sus `Detalle_Reserva`; `Pago` crea su `Boleta`. El diagrama editable en Mermaid está en `diagrama_agencia_completo.mmd`.
-- **Demostración:** `main.py` imprime los tres precios polimórficos, prueba una validación de setter, presenta una reserva con sus detalles y controla los errores de pasaporte y anticipo.
+- **Consola:** `main.py` ofrece el menú CRUD de paquetes (opciones 1 a 4) y la opción de demostración del modelo, que imprime los tres precios polimórficos, prueba una validación de setter, presenta una reserva con sus detalles y controla los errores de pasaporte y anticipo.
 - **API REST local:** `main_api.py` expone catálogo público, login JWT, consulta FX y rutas protegidas de reserva e inventario.
 - **Persistencia:** `Dao` comparte la conexión y el cursor; `PaqueteDao` implementa las operaciones de almacenamiento para paquetes.
 - **Base de datos:** `conectar.py` abre la base SQLite y activa `PRAGMA foreign_keys = ON` en la conexión.
@@ -22,7 +22,7 @@ Demostración automática del modelo de clases de una agencia de viajes. `main.p
 - Validar invariantes de paquetes al construirlos: código y duración positivos,
   nombre no vacío, precio finito y positivo, impuesto portuario finito y no
   negativo, y pasaporte estrictamente booleano.
-- Ejecutar `python main.py` de principio a fin sin interacción por teclado.
+- Ejecutar `python main.py` y operar el menú de consola para crear, listar, modificar y dar de baja paquetes; las entradas inválidas se rechazan sin cerrar el programa.
 - Usar consultas SQL parametrizadas para crear, editar y dar de baja registros.
 - Consultar la tasa USD/CLP con fallback a la última tasa persistida en SQLite.
 - Aplicar límites de solicitudes persistentes y configurables por identificador y ámbito.

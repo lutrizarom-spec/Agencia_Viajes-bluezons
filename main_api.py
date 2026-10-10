@@ -148,6 +148,7 @@ class ReservationRequest(BaseModel):
     quantity: int = Field(gt=0, le=SQLITE_INTEGER_MAX)  # Exige cupos positivos que puedan persistirse como INTEGER.
     travel_date: date  # La disponibilidad se consulta y descuenta para este día concreto.
     notification_email: EmailStr | None = None
+    passport: str | None = Field(default=None, max_length=32)  # Pasaporte del titular; obligatorio para paquetes internacionales.
 
 
 class ReservationResponse(BaseModel):
@@ -491,7 +492,7 @@ def create_app(
         try:  # El dominio comprueba también invariantes que podrían no estar en el esquema HTTP.
             package = _new_package(payload.codigo, payload)  # Construye el modelo de dominio antes de persistir.
         except ValueError as error:  # Convierte valores no válidos del dominio a un error de entrada claro.
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error  # No presenta un dato inválido como fallo interno.
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error  # No presenta un dato inválido como fallo interno.
         try:  # Traduce errores esperables de persistencia al contrato HTTP.
             with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Aísla la escritura en una conexión corta.
                 dao = PaqueteDao(connection)  # Reutiliza las operaciones de catálogo existentes.
@@ -517,7 +518,7 @@ def create_app(
         try:  # Aplica las mismas invariantes de dominio que durante la creación.
             package = _new_package(package_code, payload)  # Construye el tipo de dominio correspondiente al cuerpo.
         except ValueError as error:  # Evita devolver un 500 ante una combinación semánticamente inválida.
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error  # Expone validación como HTTP 422.
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error  # Expone validación como HTTP 422.
         try:  # Captura únicamente fallos propios de la persistencia SQLite.
             with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre una conexión corta para la edición y lectura.
                 dao = PaqueteDao(connection)  # Usa el DAO de paquetes para mantener SQL centralizado.
@@ -587,6 +588,7 @@ def create_app(
                 idempotency_key,  # Permite recuperar el mismo recibo si el cliente reenvía la clave.
                 travel_date=payload.travel_date,  # Descuenta cupos únicamente para el día solicitado.
                 notification_email=str(payload.notification_email) if payload.notification_email else None,
+                passport=payload.passport,  # Aplica la regla de pasaporte dentro de la transacción de compra.
             )  # El servicio guarda clave/huella junto al recibo y al descuento de inventario.
         except PackageNotFoundError as error:  # Mapea código inexistente a recurso no encontrado.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error  # No devuelve recibo si el paquete no existe.
@@ -601,7 +603,7 @@ def create_app(
         except (ExchangeRateUnavailableError, FxServiceError) as error:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
         except ValueError as error:  # Mapea el precio inválido o datos de dominio rechazados.
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error  # Diferencia una solicitud semánticamente inválida de fallos técnicos.
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error  # Diferencia una solicitud semánticamente inválida de fallos técnicos.
         if purchase_result.replayed:  # Distingue la repetición de una reserva que acaba de crearse.
             response.status_code = status.HTTP_200_OK  # Informa que se recuperó un recibo existente sin una nueva compra.
         return ReservationResponse(**purchase_result.receipt.__dict__)  # Serializa el recibo original confirmado por SQLite.
@@ -644,7 +646,7 @@ def create_app(
         except PurchasePersistenceError as error:  # Evita exponer detalles SQLite.
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo persistir la cancelación.") from error  # Informa el fallo técnico claramente.
         except ValueError as error:  # Rechaza identificadores o datos de entrada inválidos.
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error  # Usa respuesta estándar para entrada semánticamente inválida.
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error  # Usa respuesta estándar para entrada semánticamente inválida.
         return ReservationResponse(**receipt.__dict__)  # Devuelve el estado resultante y la fecha de cancelación.
 
     @app.get("/reservas/{reservation_id}/pago", response_model=PaymentResponse, tags=["Pagos locales"])  # Permite consultar al cliente su pago o al admin cualquiera.
@@ -711,7 +713,7 @@ def create_app(
         except PaymentIdempotencyConflictError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except ValueError as error:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
         except sqlite3.Error as error:
             logger.exception("No se pudo crear un pago para la reserva %s.", reservation_id)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo persistir el pago.") from error
@@ -736,7 +738,7 @@ def create_app(
         except PurchasePersistenceError as error:  # No expone SQL ni presenta el pago como procesado correctamente.
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo persistir el estado del pago.") from error  # Reporta el fallo técnico de forma explícita.
         except ValueError as error:  # Rechaza resultados distintos de los estados admitidos.
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error  # Señala que la transición solicitada no es válida.
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error  # Señala que la transición solicitada no es válida.
         return PaymentResponse(**payment.__dict__)  # Devuelve el resultado terminal persistido.
 
     @app.get("/tipo-cambio", response_model=ExchangeRateResponse, tags=["Indicadores"])  # Publica consulta FX con fallback de servicio.

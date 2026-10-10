@@ -1,10 +1,11 @@
-"""Línea de detalle que conserva la cantidad y el precio del paquete."""
+"""Línea de detalle que referencia un paquete o un servicio de la reserva."""
 
 from __future__ import annotations
 
 import math
 
 from model.paquete_turistico import Paquete_Turistico
+from model.servicio_turistico import Servicio_Turistico
 
 
 class Detalle_Reserva:
@@ -13,12 +14,12 @@ class Detalle_Reserva:
     def __init__(
         self,
         id_detalle: int,
-        paquete: Paquete_Turistico,
+        referencia: Paquete_Turistico | Servicio_Turistico,
         cantidad: int,
         tasa_cambio: float | None = None,
     ) -> None:
         self.id_detalle = id_detalle
-        self.paquete = paquete
+        self.referencia = referencia
         self.tasa_cambio = tasa_cambio
         self.cantidad = cantidad
 
@@ -33,14 +34,26 @@ class Detalle_Reserva:
         self.__id_detalle = valor
 
     @property
-    def paquete(self) -> Paquete_Turistico:
-        return self.__paquete
+    def referencia(self) -> Paquete_Turistico | Servicio_Turistico:
+        return self.__referencia
 
-    @paquete.setter
-    def paquete(self, valor: Paquete_Turistico) -> None:
-        if not isinstance(valor, Paquete_Turistico):
-            raise TypeError("El detalle debe referir a un Paquete_Turistico.")
-        self.__paquete = valor
+    @referencia.setter
+    def referencia(self, valor: Paquete_Turistico | Servicio_Turistico) -> None:
+        if not isinstance(valor, (Paquete_Turistico, Servicio_Turistico)):
+            raise TypeError(
+                "El detalle debe referir a un Paquete_Turistico o un Servicio_Turistico."
+            )
+        self.__referencia = valor
+
+    @property
+    def paquete(self) -> Paquete_Turistico | None:
+        """Conserva la lectura histórica del paquete cuando la línea es de paquete."""
+        return self.__referencia if isinstance(self.__referencia, Paquete_Turistico) else None
+
+    @property
+    def servicio(self) -> Servicio_Turistico | None:
+        """Expone el servicio asociado cuando la línea representa un servicio."""
+        return self.__referencia if isinstance(self.__referencia, Servicio_Turistico) else None
 
     @property
     def tasa_cambio(self) -> float | None:
@@ -62,7 +75,7 @@ class Detalle_Reserva:
     def cantidad(self, valor: int) -> None:
         if isinstance(valor, bool) or not isinstance(valor, int) or valor <= 0:
             raise ValueError("La cantidad debe ser un entero positivo.")
-        precio = self.paquete.calcular_precio(self.tasa_cambio)
+        precio = self.referencia.calcular_precio(self.tasa_cambio)
         subtotal = precio * valor
         if not math.isfinite(subtotal) or subtotal <= 0:
             raise ValueError("El subtotal debe ser finito y positivo.")

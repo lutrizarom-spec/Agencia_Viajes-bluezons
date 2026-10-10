@@ -10,6 +10,7 @@ from model.cliente import Cliente
 from model.detalle_reserva import Detalle_Reserva
 from model.paquete_turistico import Paquete_Turistico
 from model.pasaporte_requerido_error import PasaporteRequeridoError
+from model.servicio_turistico import Servicio_Turistico
 
 
 class Reserva:
@@ -99,6 +100,15 @@ class Reserva:
         return tuple(self.__detalles)
 
     @property
+    def servicios(self) -> tuple[Servicio_Turistico, ...]:
+        """Expone únicamente los servicios contratados en esta reserva."""
+        return tuple(
+            detalle.servicio
+            for detalle in self.__detalles
+            if detalle.servicio is not None
+        )
+
+    @property
     def total(self) -> float:
         total = sum(detalle.subtotal for detalle in self.__detalles)
         if not math.isfinite(total):
@@ -124,6 +134,29 @@ class Reserva:
         detalle = Detalle_Reserva(
             len(self.__detalles) + 1,
             self.paquete,
+            cantidad,
+            self.tasa_cambio_aplicada,
+        )
+        self.__detalles.append(detalle)
+        return detalle
+
+    def agregar_servicio(
+        self, servicio: Servicio_Turistico, cantidad: int = 1
+    ) -> Detalle_Reserva:
+        """Compone internamente una línea de servicio dentro de la reserva."""
+        if not isinstance(servicio, Servicio_Turistico):
+            raise TypeError("Solo se pueden agregar objetos Servicio_Turistico.")
+        if self.estado != "pendiente":
+            raise ValueError("Solo se pueden agregar servicios a una reserva pendiente.")
+        if self.fecha_viaje < self.fecha_reserva:
+            raise ValueError("La fecha de viaje no puede preceder a la reserva.")
+        if self.paquete.requiere_pasaporte and not self.cliente.validar_pasaporte():
+            raise PasaporteRequeridoError(
+                "Se requiere un pasaporte registrado para reservar un paquete internacional."
+            )
+        detalle = Detalle_Reserva(
+            len(self.__detalles) + 1,
+            servicio,
             cantidad,
             self.tasa_cambio_aplicada,
         )
@@ -168,3 +201,10 @@ class Reserva:
                 f"No se puede pasar de '{self.estado}' a '{nuevo_estado}'."
             )
         self.__estado = nuevo_estado
+
+    def _restaurar_desde_persistencia(
+        self, detalles: list[Detalle_Reserva], estado: str
+    ) -> None:
+        """Reconstruye el estado interno al cargar una reserva desde SQLite."""
+        self.__detalles = list(detalles)
+        self.__estado = estado

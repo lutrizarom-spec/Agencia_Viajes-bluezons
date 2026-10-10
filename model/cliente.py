@@ -5,6 +5,13 @@ from __future__ import annotations
 from model.persona import Persona
 
 
+def pasaporte_registrado(pasaporte: object) -> bool:
+    """Indica si existe un número de pasaporte no vacío, sin tolerar None."""
+    if not isinstance(pasaporte, str):
+        return False
+    return bool(pasaporte.strip())
+
+
 class Cliente(Persona):
     """Representa al cliente, incluido el dato textual de su pasaporte."""
 
@@ -55,4 +62,4 @@ class Cliente(Persona):
 
     def validar_pasaporte(self) -> bool:
         """Indica si el cliente registró un número de pasaporte no vacío."""
-        return bool(self.pasaporte)
+        return pasaporte_registrado(self.pasaporte)

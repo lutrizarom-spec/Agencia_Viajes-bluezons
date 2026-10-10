@@ -187,7 +187,7 @@ class LocalApiIntegrationTests(unittest.TestCase):
         self.assertEqual(inventory.status_code, 200, inventory.text)
         purchase = self.client.post(
             "/reservas",
-            json={"package_code": 102, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},
+            json={"package_code": 102, "quantity": 1, "travel_date": TRAVEL_DATE_JSON, "passport": "AB123456"},
             headers={"Authorization": f"Bearer {self._login('10.000.013-K', 'cliente-seguro-local-2026')}"},
         )
         self.assertEqual(purchase.status_code, 201, purchase.text)

@@ -14,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path  # Acepta rutas locales de base de datos.
 from collections.abc import Callable  # Tipifica el proveedor de tasa de cambio inyectado desde FxService.
 
+from model.cliente import pasaporte_registrado  # Reutiliza la regla de pasaporte del dominio.
 from model.paquete_crucero import Paquete_Crucero  # Reconstruye la regla existente de precio de crucero.
 from model.paquete_internacional import Paquete_Internacional  # Reconstruye la regla existente de precio internacional.
 from model.paquete_nacional import Paquete_Nacional  # Reconstruye el modelo nacional sin cambiar su fórmula.
@@ -48,6 +49,10 @@ class InvalidPackagePriceError(ValueError):
 
 class ExchangeRateUnavailableError(RuntimeError):
     """Señala que una compra internacional no tiene proveedor de tasa configurado."""
+
+
+class PassportRequiredError(ValueError):
+    """Señala que una compra internacional no incluye un pasaporte válido."""
 
 
 class IdempotencyConflictError(ValueError):
@@ -188,9 +193,10 @@ class CompraService:
         *,
         travel_date: date,
         notification_email: str | None = None,
+        passport: str | None = None,
     ) -> ReservationReceipt:
         """Confirma una compra no idempotente y conserva la firma pública existente."""
-        result = self.purchase_idempotently(rut, package_code, quantity, travel_date=travel_date, notification_email=notification_email)  # Delega a la operación transaccional común sin clave idempotente.
+        result = self.purchase_idempotently(rut, package_code, quantity, travel_date=travel_date, notification_email=notification_email, passport=passport)  # Delega a la operación transaccional común sin clave idempotente.
         return result.receipt  # Conserva el tipo de retorno usado por los consumidores existentes.
 
     def purchase_idempotently(
@@ -202,6 +208,7 @@ class CompraService:
         *,
         travel_date: date,
         notification_email: str | None = None,
+        passport: str | None = None,
     ) -> IdempotentPurchaseResult:
         """Compra una sola vez por RUT/clave y reproduce el recibo en reintentos."""
         normalized_rut = normalize_rut(rut)  # Asegura que el comprador quede vinculado al RUT autenticado normalizado.
@@ -216,7 +223,9 @@ class CompraService:
             if not isinstance(notification_email, str) or not notification_email.strip():
                 raise ValueError("notification_email debe ser una dirección no vacía.")
             request_material += f":{notification_email.strip().casefold()}"
-        request_hash = hashlib.sha256(request_material.encode("utf-8")).hexdigest() if normalized_key else None  # Vincula la clave también a la dirección de notificación.
+        referencia_pasaporte = passport.strip() if isinstance(passport, str) else ""  # Normaliza el pasaporte opcional para la huella idempotente.
+        request_material += f":passport={referencia_pasaporte}"  # Distingue reintentos con otro pasaporte bajo la misma clave.
+        request_hash = hashlib.sha256(request_material.encode("utf-8")).hexdigest() if normalized_key else None  # Vincula la clave al cuerpo completo, incluido el pasaporte.
 
         if normalized_key is not None:
             previous = self._find_reservation_by_key(normalized_rut, normalized_key)  # Evita consultar FX en reintentos ya completados.
@@ -229,7 +238,7 @@ class CompraService:
 
         for attempt in range(1, self._max_write_attempts + 1):  # Ejecuta el número de intentos acotado por configuración.
             try:  # Repite la transacción completa solo para bloqueos SQLite transitorios.
-                receipt, replayed = self._purchase_once(normalized_rut, package_code, quantity, normalized_travel_date, exchange_rate, normalized_key, request_hash, notification_email)  # Ejecuta una transacción indivisible o recupera el resultado anterior.
+                receipt, replayed = self._purchase_once(normalized_rut, package_code, quantity, normalized_travel_date, exchange_rate, normalized_key, request_hash, notification_email, passport)  # Ejecuta una transacción indivisible o recupera el resultado anterior.
                 return IdempotentPurchaseResult(receipt=receipt, replayed=replayed)  # Devuelve el recibo junto a su estado de repetición.
             except sqlite3.OperationalError as error:  # Distingue los bloqueos transitorios de otros errores de SQL.
                 if not self._is_database_locked(error):  # No reintenta sintaxis SQL ni otros OperationalError permanentes.
@@ -252,6 +261,7 @@ class CompraService:
         idempotency_key: str | None,
         request_hash: str | None,
         notification_email: str | None,
+        passport: str | None,
     ) -> tuple[ReservationReceipt, bool]:
         """Realiza una transacción de compra o lee la reserva ya confirmada."""
         reservation_id = str(uuid.uuid4())  # Genera un UUID distinto para una nueva compra; no se usa al reproducir.
@@ -299,6 +309,8 @@ class CompraService:
                 ).fetchone()  # Lee producto e inventario en una sola consulta.
                 if package_row is None:  # Distingue un código inexistente de una falta de cupos.
                     raise PackageNotFoundError("No existe el paquete solicitado.")  # La API traducirá esta condición a HTTP 404.
+                if package_row[4] == "internacional" and not pasaporte_registrado(passport):  # Solo los paquetes internacionales exigen pasaporte.
+                    raise PassportRequiredError("El paquete internacional requiere un pasaporte válido para confirmar la compra.")  # Evita confirmar sin pasaporte antes de tocar inventario.
                 if package_row[7] is None:  # Una fila NULL indica que un administrador aún no configuró capacidad.
                     raise InventoryNotConfiguredError("El paquete todavía no tiene cupos configurados.")  # Impide vender disponibilidad desconocida.
 
