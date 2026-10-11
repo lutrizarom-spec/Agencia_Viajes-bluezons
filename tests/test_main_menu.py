@@ -147,6 +147,37 @@ class MenuConsolaTests(unittest.TestCase):
         self.assertEqual(crucero[4], "crucero")
         self.assertEqual(crucero[6], 25000)
 
+    def test_demostracion_usa_la_tasa_del_servicio_para_paquetes_extranjeros(self) -> None:
+        """La demo convierte internacional y crucero con la tasa obtenida por FxService."""
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "demo.db"
+            with patch("main.mindicador_usd_clp_provider", return_value=950.0):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    main_module.demostracion_modelo(str(db_path))
+
+        salida = buffer.getvalue()
+        self.assertIn("180.000,00", salida)  # Nacional conserva su precio base sin conversión.
+        self.assertIn("237.500,00", salida)  # Internacional: 250 USD × 950 CLP/USD.
+        self.assertIn("405.000,00", salida)  # Crucero: 400 USD × 950 + 25.000 de impuesto.
+        self.assertNotIn("225.000,00", salida)  # No debe reaparecer la conversión fija con 900.
+
+    def test_demostracion_omite_extranjeros_sin_tasa_y_continua(self) -> None:
+        """Sin tasa válida ni caché, la demo informa, omite extranjeros y mantiene nacionales."""
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "demo.db"
+            with patch("main.mindicador_usd_clp_provider", side_effect=OSError("sin red")):
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    main_module.demostracion_modelo(str(db_path))
+
+        salida = buffer.getvalue()
+        self.assertIn("180.000,00", salida)  # El paquete nacional sigue calculándose.
+        self.assertIn("no se pudo obtener la tasa", salida)  # Informa el motivo del fallo.
+        self.assertIn("omitido", salida)  # Deja constancia de los precios extranjeros omitidos.
+        self.assertNotIn("225.000,00", salida)  # Nunca sustituye la tasa por 900 para internacional.
+        self.assertNotIn("385.000,00", salida)  # El crucero tampoco usa la conversión fija con 900.
+
     def test_main_completa_el_flujo_de_consola_con_base_temporal(self) -> None:
         """`main(db_path=...)` arranca el menú desde el punto de entrada real."""
         with patch(

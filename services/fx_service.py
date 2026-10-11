@@ -2,7 +2,6 @@
 
 from __future__ import annotations  # Permite expresar tipos diferidos y anotaciones modernas.
 
-import json  # Convierte el cuerpo JSON de la respuesta HTTP de mindicador.cl a objetos Python.
 import math  # Permite rechazar valores NaN e infinitos que no son tasas válidas.
 import sqlite3  # Proporciona la persistencia local de la tasa vigente y su respaldo.
 import threading  # Serializa llamadas en una instancia y evita probes simultáneos al proveedor.
@@ -10,19 +9,22 @@ import time  # Proporciona el reloj monotónico predeterminado del circuit break
 from collections.abc import Callable  # Describe el tipo de proveedor inyectable que devuelve una tasa.
 from contextlib import closing  # Cierra explícitamente conexiones SQLite, incluso si ocurre una excepción.
 from pathlib import Path  # Acepta rutas de base de datos como texto o como objetos Path.
-from urllib.request import urlopen  # Consulta HTTPS sin requerir dependencias HTTP adicionales.
+
+import requests  # Realiza la solicitud HTTPS al proveedor real del tipo de cambio.
 
 
 def mindicador_usd_clp_provider() -> float:
     """Consulta el dólar observado en mindicador.cl y retorna su valor numérico.
 
-    Esta función puede inyectarse como provider de FxService. Si la respuesta
-    HTTP o su JSON son inválidos, propaga el error para que FxService active la
-    caché y el circuit breaker. El timeout evita dejar una solicitud bloqueada.
+    Esta función puede inyectarse como provider de FxService. Si la solicitud
+    falla por timeout, error HTTP, problema de conexión o JSON inválido,
+    propaga el error para que FxService active la caché y el circuit breaker.
+    El timeout evita dejar una solicitud bloqueada.
     """
     request_url = "https://mindicador.cl/api/dolar"  # Pide solamente el indicador dólar a la API pública.
-    with urlopen(request_url, timeout=5) as response:  # Abre HTTPS con timeout; errores HTTP/red se propagan al servicio.
-        payload = json.loads(response.read().decode("utf-8"))  # Lee el cuerpo, lo decodifica y analiza el JSON.
+    response = requests.get(request_url, timeout=5)  # Realiza la solicitud con un timeout explícito de cinco segundos.
+    response.raise_for_status()  # Convierte respuestas 4xx/5xx en errores que FxService gestiona como fallo de proveedor.
+    payload = response.json()  # Analiza el cuerpo JSON; un formato inválido también se propaga al servicio.
 
     series = payload.get("serie") if isinstance(payload, dict) else None  # Extrae la serie solo si la raíz JSON es un objeto.
     if not isinstance(series, list) or not series:  # Comprueba que la API haya devuelto al menos una observación.

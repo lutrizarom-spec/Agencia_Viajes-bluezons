@@ -6,7 +6,7 @@ import math
 import sqlite3
 from datetime import date
 
-from conectar import crear_conexion
+from conectar import crear_conexion, resolver_ruta_base_datos
 from dao.paquete_dao import PaqueteDao
 from model.anticipo_insuficiente_error import AnticipoInsuficienteError
 from model.cliente import Cliente
@@ -18,6 +18,11 @@ from model.paquete_nacional import Paquete_Nacional
 from model.paquete_turistico import Paquete_Turistico
 from model.pasaporte_requerido_error import PasaporteRequeridoError
 from model.reserva import Reserva
+from services.fx_service import (
+    FxService,
+    FxServiceError,
+    mindicador_usd_clp_provider,
+)
 
 TEXTO_MENU = """
 === Agencia de Viajes: menú principal ===
@@ -218,8 +223,24 @@ def eliminar_paquete(dao: PaqueteDao, leer, mostrar) -> None:
     mostrar("  Paquete dado de baja correctamente.")
 
 
-def demostracion_modelo() -> None:
-    """Muestra herencia, polimorfismo y reglas del dominio sin usar base de datos."""
+def _tasa_usd_clp(db_path: str | None) -> float | None:
+    """Obtiene la tasa USD/CLP del servicio FX; informa y retorna None si no hay tasa."""
+    servicio = FxService(
+        resolver_ruta_base_datos(db_path),
+        mindicador_usd_clp_provider,
+    )
+    try:
+        return servicio.get_usd_clp_rate()
+    except FxServiceError as error:
+        print(
+            "  Nota: no se pudo obtener la tasa USD/CLP "
+            f"({error}). Se omitirán los precios de paquetes internacionales y cruceros."
+        )
+        return None
+
+
+def demostracion_modelo(db_path: str | None = None) -> None:
+    """Muestra herencia y reglas del dominio usando la tasa real para paquetes extranjeros."""
     paquetes: list[Paquete_Turistico] = [
         Paquete_Nacional(101, "Valle del Elqui", 4, 180000.0),
         Paquete_Internacional(102, "Buenos Aires", 5, 250.0, True),
@@ -227,23 +248,34 @@ def demostracion_modelo() -> None:
     ]
 
     print("=== Paquetes: herencia y cálculo polimórfico ===")
+    tasa_usd_clp = _tasa_usd_clp(db_path)
     reglas_precio = {
         Paquete_Nacional: ("CLP", "precio base sin conversión"),
-        Paquete_Internacional: ("USD", "precio base × 900 CLP/USD"),
-        Paquete_Crucero: ("USD", "precio base × 900 CLP/USD"),
+        Paquete_Internacional: ("USD", "precio base × tasa USD/CLP"),
+        Paquete_Crucero: ("USD", "precio base × tasa USD/CLP"),
     }
     for paquete in paquetes:
         moneda_base, regla = reglas_precio[type(paquete)]
+        es_extranjero = isinstance(paquete, (Paquete_Internacional, Paquete_Crucero))
         if isinstance(paquete, Paquete_Crucero):
             regla += (
                 f" + impuesto portuario de "
                 f"${formatear_monto(paquete.impuesto_puerto)}"
             )
+        if es_extranjero and tasa_usd_clp is None:
+            print(
+                f"{type(paquete).__name__}: {paquete.nombre} | "
+                f"Precio base: ${formatear_monto(paquete.precio_base)} {moneda_base} | "
+                f"Regla aplicada: {regla} | "
+                "Precio calculado: omitido (sin tasa USD/CLP disponible)"
+            )
+            continue
+        tasa = tasa_usd_clp if es_extranjero else None
         print(
             f"{type(paquete).__name__}: {paquete.nombre} | "
             f"Precio base: ${formatear_monto(paquete.precio_base)} {moneda_base} | "
             f"Regla aplicada: {regla} | "
-            f"Precio calculado: ${formatear_monto(paquete.calcular_precio(900))} CLP"
+            f"Precio calculado: ${formatear_monto(paquete.calcular_precio(tasa))} CLP"
         )
 
     cliente = Cliente(
@@ -359,7 +391,7 @@ def demostracion_modelo() -> None:
     )
 
 
-def ejecutar_menu(dao: PaqueteDao, leer=None, mostrar=None) -> None:
+def ejecutar_menu(dao: PaqueteDao, leer=None, mostrar=None, db_path: str | None = None) -> None:
     """Ejecuta el bucle del menú hasta que el usuario elija salir."""
     if leer is None:
         leer = input
@@ -370,7 +402,7 @@ def ejecutar_menu(dao: PaqueteDao, leer=None, mostrar=None) -> None:
         "2": lambda: listar_paquetes(dao, mostrar),
         "3": lambda: modificar_paquete(dao, leer, mostrar),
         "4": lambda: eliminar_paquete(dao, leer, mostrar),
-        "5": demostracion_modelo,
+        "5": lambda: demostracion_modelo(db_path),
     }
     while True:
         mostrar(TEXTO_MENU)
@@ -401,7 +433,7 @@ def main(db_path: str | None = None) -> None:
     try:
         dao = PaqueteDao(conexion)
         dao.crear_tabla()
-        ejecutar_menu(dao)
+        ejecutar_menu(dao, db_path=db_path)
     finally:
         conexion.close()
 

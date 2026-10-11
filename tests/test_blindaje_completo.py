@@ -1,11 +1,12 @@
 import concurrent.futures  # Permite simular muchas solicitudes simultáneas al mismo bucket.
-import io  # Construye una respuesta HTTP en memoria para probar el proveedor sin red.
 import sqlite3  # Prepara esquemas legados y comprueba la evolución compatible del bucket.
 import tempfile  # Aísla cada prueba en una base SQLite temporal que se elimina al final.
 import unittest  # Proporciona las clases de prueba y las aserciones del proyecto.
 from contextlib import closing  # Cierra explícitamente bases temporales antes de eliminarlas en Windows.
 from pathlib import Path  # Construye rutas de base portables en todos los entornos.
-from unittest.mock import patch  # Sustituye urlopen por una respuesta controlada durante el test.
+from unittest.mock import Mock, patch  # Sustituye la llamada HTTP por respuestas controladas durante el test.
+
+import requests  # Aporta las excepciones concretas que debe propagar el proveedor.
 
 from conectar import is_database_locked  # Helper compartido que clasifica bloqueos SQLite en toda la app.
 from services.fx_service import (  # Importa las piezas del servicio FX que se verifican.
@@ -21,16 +22,52 @@ class FxServiceTests(unittest.TestCase):
 
     def test_mindicador_provider_parses_latest_usd_clp_value(self) -> None:
         """El adaptador lee el valor de la respuesta JSON sin depender de internet."""
-        response_body = io.BytesIO(  # Simula un cuerpo HTTP legible por urlopen.
-            b'{"serie":[{"fecha":"2026-10-05","valor":987.65}]}'  # Imita la estructura documentada de mindicador.cl.
-        )  # El objeto también implementa el context manager de la respuesta HTTP.
-        with patch("services.fx_service.urlopen", return_value=response_body) as mocked_urlopen:  # Aísla el test de la disponibilidad de la API pública.
+        response = Mock()  # Simula la respuesta de requests sin abrir un socket.
+        response.json.return_value = {  # Imita la estructura documentada de mindicador.cl.
+            "serie": [{"fecha": "2026-10-05", "valor": 987.65}]
+        }  # El mock devuelve el cuerpo ya decodificado como haría requests.
+        with patch("services.fx_service.requests.get", return_value=response) as mocked_get:  # Aísla el test de la API pública.
             rate = mindicador_usd_clp_provider()  # Ejecuta el adaptador real contra la respuesta simulada.
 
         self.assertEqual(rate, 987.65)  # Verifica que el adaptador retorna el valor observado como float.
-        mocked_urlopen.assert_called_once_with(  # Confirma el endpoint concreto y que se configuró timeout.
+        mocked_get.assert_called_once_with(  # Confirma el endpoint concreto y que se configuró timeout.
             "https://mindicador.cl/api/dolar", timeout=5
         )  # Un timeout finito limita cuánto puede bloquear la llamada en producción.
+        response.raise_for_status.assert_called_once_with()  # Verifica que las respuestas 4xx/5xx se detectan antes de leer el JSON.
+
+    def test_mindicador_provider_propagates_timeout(self) -> None:
+        """Un timeout de requests debe propagarse para activar el fallback del servicio."""
+        with patch(  # Fuerza el escenario de lentitud del proveedor sin esperar en tiempo real.
+            "services.fx_service.requests.get",
+            side_effect=requests.exceptions.Timeout("agotado"),
+        ):
+            with self.assertRaises(requests.exceptions.Timeout):  # El proveedor no debe tragarse el error de red.
+                mindicador_usd_clp_provider()  # Ejecuta el adaptador contra el timeout simulado.
+
+    def test_mindicador_provider_propagates_http_error(self) -> None:
+        """Una respuesta HTTP no exitosa debe propagarse como error del proveedor."""
+        response = Mock()  # Representa una respuesta con estado 5xx.
+        response.raise_for_status.side_effect = requests.exceptions.HTTPError("500")  # Simula el fallo que detecta raise_for_status.
+        with patch("services.fx_service.requests.get", return_value=response):  # Evita la red y entrega la respuesta fallida.
+            with self.assertRaises(requests.exceptions.HTTPError):  # El adaptador no debe ocultar el error HTTP.
+                mindicador_usd_clp_provider()  # Ejecuta el adaptador contra el error HTTP simulado.
+
+    def test_mindicador_provider_propagates_connection_error(self) -> None:
+        """Una conexión fallida debe propagarse para que FxService use la caché."""
+        with patch(  # Simula que el host no es alcanzable.
+            "services.fx_service.requests.get",
+            side_effect=requests.exceptions.ConnectionError("sin conexión"),
+        ):
+            with self.assertRaises(requests.exceptions.ConnectionError):  # El fallo de red debe llegar al servicio.
+                mindicador_usd_clp_provider()  # Ejecuta el adaptador contra la conexión fallida.
+
+    def test_mindicador_provider_rejects_invalid_response(self) -> None:
+        """Una respuesta sin observaciones utilizables debe ser un error del proveedor."""
+        response = Mock()  # Representa una respuesta 200 con JSON inesperado.
+        response.json.return_value = {"serie": []}  # Sin observaciones no hay tasa que devolver.
+        with patch("services.fx_service.requests.get", return_value=response):  # Evita la red y entrega el cuerpo vacío.
+            with self.assertRaises(ValueError):  # El adaptador debe rechazar una respuesta válida pero inutilizable.
+                mindicador_usd_clp_provider()  # Ejecuta el adaptador contra la respuesta inválida.
 
     def test_provider_failure_uses_last_cached_rate(self) -> None:
         """Una cotización previa debe seguir disponible cuando falla el proveedor."""
