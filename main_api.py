@@ -34,6 +34,7 @@ from pydantic import (  # Valida cuerpos JSON y documenta esquemas OpenAPI.
     model_validator,
 )
 
+from conectar import is_database_locked  # Clasifica bloqueos SQLite con el mismo criterio en toda la app.
 from dao.paquete_dao import PaqueteDao  # Reutiliza la lectura del catálogo ya implementada.
 from model.money import from_minor_units, to_minor_units
 from model.paquete_crucero import Paquete_Crucero  # Calcula precio del subtipo crucero mediante su modelo existente.
@@ -288,21 +289,11 @@ def _admin_package_response(row: tuple[Any, ...]) -> AdminPackageResponse:
     )  # Retorna un objeto JSON consistente para las rutas administrativas.
 
 
-def _is_database_locked(error: sqlite3.OperationalError) -> bool:
-    """Reconoce solo errores SQLite BUSY/LOCKED, nunca sintaxis u otros fallos."""
-    error_code = getattr(error, "sqlite_errorcode", None)  # Obtiene el código extendido disponible en las versiones actuales de sqlite3.
-    if error_code is not None:  # Prefiere el código estable cuando Python lo proporciona.
-        primary_code = error_code & 0xFF  # SQLite guarda el código primario en los ocho bits inferiores.
-        return primary_code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)  # Solo bloqueos se consideran transitorios.
-    message = str(error).casefold()  # Compatibilidad con runtimes antiguos que no exponen sqlite_errorcode.
-    return "database is locked" in message or "database table is locked" in message  # Usa mensajes exactos conocidos como fallback limitado.
-
-
 def _package_persistence_http_error(
     error: sqlite3.Error, *, log_message: str, detail: str
 ) -> HTTPException:
     """Traduce un fallo SQLite de paquetes: bloqueo transitorio a 503, resto a 500."""
-    if isinstance(error, sqlite3.OperationalError) and _is_database_locked(error):  # Un bloqueo admite reintento inmediato con la misma solicitud.
+    if isinstance(error, sqlite3.OperationalError) and is_database_locked(error):  # Un bloqueo admite reintento inmediato con la misma solicitud.
         return HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="La base de datos está ocupada; reintente más tarde.", headers={"Retry-After": "1"})  # No expone SQL ni reintenta internamente.
     logger.exception(log_message)  # Registra el diagnóstico del fallo no transitorio.
     return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail)  # Conserva el 500 y su detalle actual.
@@ -528,6 +519,10 @@ def create_app(
             except FxServiceError as error:
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error
             price = float(from_minor_units(to_minor_units(price)))
+            try:  # Traduce bloqueos de la lectura de inventario a indisponibilidad temporal.
+                available_capacity = compra_service.get_available_capacity(package.codigo, travel_date)  # Filtra por la fecha solicitada cuando viene en query.
+            except sqlite3.Error as error:  # Un lock de inventario pasa a 503; el resto conserva el 500 genérico.
+                raise _package_persistence_http_error(error, log_message=f"No se pudo leer la disponibilidad del paquete {package.codigo}.", detail="No se pudo leer la disponibilidad del paquete.") from error
             response.append(  # Añade los datos públicos, precio y cupos conocidos.
                 PackageResponse(
                     codigo=package.codigo,  # Conserva la clave existente del catálogo.
@@ -535,7 +530,7 @@ def create_app(
                     duracion=package.duracion,  # Informa la duración ya almacenada.
                     tipo=row[4],  # Mantiene la categoría original persistida.
                     precio_por_persona=price,  # Usa FX para internacional/crucero y la regla local para los demás.
-                    cupos_disponibles=compra_service.get_available_capacity(package.codigo, travel_date),  # Filtra por la fecha solicitada cuando viene en query.
+                    cupos_disponibles=available_capacity,  # Filtra por la fecha solicitada cuando viene en query.
                     travel_date=travel_date,
                 )  # Crea un modelo Pydantic validado antes de la respuesta.
             )  # Incorpora el paquete actual a la respuesta del catálogo.
@@ -606,7 +601,7 @@ def create_app(
                 row = PaqueteDao(connection).obtener_paquete(package_code)  # Recupera la versión persistida de un paquete activo.
         except sqlite3.Error as error:  # Un fallo de relectura responde 500, no 503, porque la edición ya se confirmó.
             logger.exception("No se pudo leer el paquete actualizado %s.", package_code)  # Registra el diagnóstico de la anomalía.
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo actualizar el paquete.") from error  # Devuelve fallo explícito.
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="El paquete se actualizó, pero no pudo recuperarse.") from error  # Devuelve fallo explícito; la edición ya está confirmada.
         if row is None:  # El código inexistente o la baja lógica se consideran recurso no editable.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No existe un paquete activo con ese código.")  # Evita reactivar accidentalmente una baja.
         return _admin_package_response(row)  # Devuelve la versión actual persistida.

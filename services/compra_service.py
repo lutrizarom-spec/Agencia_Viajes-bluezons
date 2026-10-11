@@ -15,6 +15,7 @@ from decimal import Decimal
 from pathlib import Path  # Acepta rutas locales de base de datos.
 from typing import Any  # Anota las filas crudas de SQLite, que no exponen tipos estáticos.
 
+from conectar import is_database_locked  # Clasifica bloqueos SQLite con el mismo criterio que el resto de la app.
 from model.cliente import pasaporte_registrado  # Reutiliza la regla de pasaporte del dominio.
 from model.money import MAX_MINOR_UNITS, from_minor_units, half_up_minor_units, to_minor_units
 from model.paquete_factory import paquete_desde_columnas  # Fuente única del mapeo tipo→modelo.
@@ -240,7 +241,7 @@ class CompraService:
                 receipt, replayed = self._purchase_once(normalized_rut, package_code, quantity, normalized_travel_date, exchange_rate, normalized_key, request_hash, notification_email, passport)  # Ejecuta una transacción indivisible o recupera el resultado anterior.
                 return IdempotentPurchaseResult(receipt=receipt, replayed=replayed)  # Devuelve el recibo junto a su estado de repetición.
             except sqlite3.OperationalError as error:  # Distingue los bloqueos transitorios de otros errores de SQL.
-                if not self._is_database_locked(error):  # No reintenta sintaxis SQL ni otros OperationalError permanentes.
+                if not is_database_locked(error):  # No reintenta sintaxis SQL ni otros OperationalError permanentes.
                     raise PurchasePersistenceError("SQLite rechazó la operación de compra.") from error  # Informa el fallo SQL sin mostrar detalles internos.
                 if attempt == self._max_write_attempts:  # Comprueba si ya se consumió el presupuesto de reintentos.
                     raise DatabaseBusyError("La base de datos sigue ocupada; reintente la compra.") from error  # Devuelve un error de dominio recuperable por el cliente.
@@ -467,16 +468,6 @@ class CompraService:
         return CompraService._receipt_from_row(row)
 
     @staticmethod
-    def _is_database_locked(error: sqlite3.OperationalError) -> bool:
-        """Reconoce solo errores SQLite BUSY/LOCKED, nunca sintaxis u otros fallos."""
-        error_code = getattr(error, "sqlite_errorcode", None)  # Obtiene el código extendido disponible en las versiones actuales de sqlite3.
-        if error_code is not None:  # Prefiere el código estable cuando Python lo proporciona.
-            primary_code = error_code & 0xFF  # SQLite guarda el código primario en los ocho bits inferiores.
-            return primary_code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)  # Solo bloqueos se consideran transitorios.
-        message = str(error).casefold()  # Compatibilidad con runtimes antiguos que no exponen sqlite_errorcode.
-        return "database is locked" in message or "database table is locked" in message  # Usa mensajes exactos conocidos como fallback limitado.
-
-    @staticmethod
     def _receipt_from_row(row: tuple[Any, ...]) -> ReservationReceipt:
         """Reconstruye un recibo persistido desde las columnas de reserva."""
         return ReservationReceipt(  # Normaliza los valores SQLite al contrato inmutable del servicio.
@@ -587,7 +578,7 @@ class CompraService:
             try:  # Repite la transacción completa solo cuando SQLite reporta lock transitorio.
                 return self._cancel_once(reservation_id.strip(), normalized_rut, is_admin)  # Ejecuta cancelación o reproduce el estado ya cancelado.
             except sqlite3.OperationalError as error:  # Clasifica errores de operación provenientes de SQLite.
-                if not self._is_database_locked(error):  # No reintenta sintaxis, disco lleno ni otros errores permanentes.
+                if not is_database_locked(error):  # No reintenta sintaxis, disco lleno ni otros errores permanentes.
                     raise PurchasePersistenceError("SQLite rechazó la cancelación de la reserva.") from error  # Expone un error de dominio y conserva la causa.
                 if attempt == self._max_write_attempts:  # Comprueba si se consumieron todos los intentos configurados.
                     raise DatabaseBusyError("La base de datos sigue ocupada; reintente la cancelación.") from error  # Permite reintentar la operación de forma segura.
@@ -756,7 +747,7 @@ class CompraService:
                     idempotency_key=idempotency_key,
                 )  # Devuelve el recibo del pago recién creado.
             except sqlite3.OperationalError as error:  # Distingue un lock de otros errores SQL permanentes.
-                if not self._is_database_locked(error):  # Evita reintentar sintaxis, disco u otros fallos.
+                if not is_database_locked(error):  # Evita reintentar sintaxis, disco u otros fallos.
                     raise PurchasePersistenceError("SQLite rechazó la creación del pago.") from error  # Traduce el error técnico a dominio.
                 if attempt == self._max_write_attempts:  # Comprueba si ya se agotó el presupuesto de reintentos.
                     raise DatabaseBusyError("La base de datos sigue ocupada; reintente la creación del pago.") from error  # Informa indisponibilidad temporal.
@@ -882,7 +873,7 @@ class CompraService:
             try:  # Ejecuta la expiración completa con reglas de retry consistentes con otras escrituras.
                 return self._expire_pending_once(current_iso)  # Libera capacidad solamente para pagos que aún estaban pendientes.
             except sqlite3.OperationalError as error:  # Clasifica locks transitorios de SQLite.
-                if not self._is_database_locked(error):  # No repite errores permanentes ni SQL inválido.
+                if not is_database_locked(error):  # No repite errores permanentes ni SQL inválido.
                     raise PurchasePersistenceError("SQLite rechazó la expiración de pagos.") from error  # Informa explícitamente el fallo técnico.
                 if attempt == self._max_write_attempts:  # Comprueba el límite de intentos configurado.
                     raise DatabaseBusyError("La base de datos sigue ocupada al expirar pagos.") from error  # Permite que el ciclo siguiente vuelva a intentarlo.
@@ -973,7 +964,7 @@ class CompraService:
             try:  # Repite únicamente bloqueos transitorios de SQLite.
                 return self._transition_payment_once(reservation_id, target_status, payment_id)  # Cambia pago, reserva e inventario atómicamente.
             except sqlite3.OperationalError as error:  # Distingue un lock de otros errores SQL permanentes.
-                if not self._is_database_locked(error):  # Evita reintentos de sintaxis, disco u otros fallos.
+                if not is_database_locked(error):  # Evita reintentos de sintaxis, disco u otros fallos.
                     raise PurchasePersistenceError("SQLite rechazó la actualización del pago.") from error  # Traduce el error técnico a dominio.
                 if attempt == self._max_write_attempts:  # Comprueba si ya se agotó el presupuesto de reintentos.
                     raise DatabaseBusyError("La base de datos sigue ocupada; reintente la actualización del pago.") from error  # Informa indisponibilidad temporal.

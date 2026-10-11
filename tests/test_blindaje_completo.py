@@ -7,6 +7,7 @@ from contextlib import closing  # Cierra explícitamente bases temporales antes 
 from pathlib import Path  # Construye rutas de base portables en todos los entornos.
 from unittest.mock import patch  # Sustituye urlopen por una respuesta controlada durante el test.
 
+from conectar import is_database_locked  # Helper compartido que clasifica bloqueos SQLite en toda la app.
 from services.fx_service import (  # Importa las piezas del servicio FX que se verifican.
     FxService,  # Servicio que valida y guarda tasas recibidas del proveedor.
     FxServiceError,  # Excepción de dominio al fallar tanto proveedor como caché.
@@ -98,6 +99,42 @@ class FxServiceTests(unittest.TestCase):
             current_time[0] = 10  # Avanza exactamente hasta el instante en que se permite el probe.
             self.assertEqual(service.get_usd_clp_rate(), 960.0)  # El probe exitoso devuelve y persiste la nueva tasa.
             self.assertEqual(provider_calls[0], 4)  # Confirma que el proveedor volvió a invocarse una vez vencido el timeout.
+
+
+class _CodedOperationalError(sqlite3.OperationalError):
+    """Error SQLite de prueba cuyo sqlite_errorcode se controla explícitamente."""
+
+    def __init__(self, message: str, code: int | None) -> None:  # Acepta None para ejercitar el fallback por mensaje.
+        super().__init__(message)  # Conserva el mensaje que el helper inspecciona como respaldo.
+        self._test_code = code  # Guarda el código que expondrá la propiedad de la subclase.
+
+    @property
+    def sqlite_errorcode(self) -> int | None:  # Sustituye el descriptor de sqlite3 para pruebas deterministas.
+        return self._test_code  # Devuelve el código configurado, incluido None.
+
+
+class SqliteLockClassificationTests(unittest.TestCase):
+    """Comprueba que el helper compartido clasifica solo bloqueos BUSY/LOCKED."""
+
+    def test_primary_busy_and_locked_codes_are_locks(self) -> None:
+        """Los códigos primarios BUSY y LOCKED se reconocen como transitorios."""
+        self.assertTrue(is_database_locked(_CodedOperationalError("cualquiera", sqlite3.SQLITE_BUSY)))  # BUSY primario es un lock.
+        self.assertTrue(is_database_locked(_CodedOperationalError("cualquiera", sqlite3.SQLITE_LOCKED)))  # LOCKED primario es un lock.
+
+    def test_extended_busy_code_is_classified_as_lock(self) -> None:
+        """Un código extendido de BUSY se reduce con & 0xFF y sigue siendo lock."""
+        extended_busy = sqlite3.SQLITE_BUSY | (1 << 8)  # Representa un código extendido real de SQLite.
+        self.assertTrue(is_database_locked(_CodedOperationalError("cualquiera", extended_busy)))  # El enmascaramiento recupera el código primario.
+
+    def test_non_lock_code_is_not_a_lock(self) -> None:
+        """Un código primario distinto de BUSY/LOCKED no se considera transitorio."""
+        self.assertFalse(is_database_locked(_CodedOperationalError("near 'BROKEN': syntax error", 999)))  # Un error permanente no es lock.
+
+    def test_message_fallback_applies_without_error_code(self) -> None:
+        """Sin sqlite_errorcode se usa el mensaje conocido como fallback limitado."""
+        self.assertTrue(is_database_locked(_CodedOperationalError("database is locked", None)))  # El mensaje BUSY se reconoce.
+        self.assertTrue(is_database_locked(_CodedOperationalError("database table is locked", None)))  # El mensaje LOCKED de tabla se reconoce.
+        self.assertFalse(is_database_locked(_CodedOperationalError("near 'BROKEN': syntax error", None)))  # Un mensaje distinto no es lock.
 
 
 class RateLimiterTests(unittest.TestCase):

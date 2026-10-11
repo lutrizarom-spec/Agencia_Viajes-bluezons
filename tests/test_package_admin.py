@@ -320,6 +320,34 @@ class PackageAdminApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 500, response.text)  # No debe ser 503 tras el commit.
         self.assertEqual(response.json()["detail"], "No se pudo recuperar el paquete desactivado.")  # Mensaje existente del caso.
 
+    def test_update_package_post_commit_read_failure_returns_500(self) -> None:
+        """Si la lectura posterior al commit falla, la edición responde 500 y no 503."""
+        self._create_national_package(407)  # Deja un paquete activo editable.
+        with patch.object(PaqueteDao, "obtener_paquete", side_effect=sqlite3.OperationalError("database is locked")):  # Simula bloqueo solo en la relectura.
+            response = self.client.put(  # La edición se confirma antes de la lectura posterior.
+                "/admin/paquetes/407",  # Ruta que edita y relee el catálogo.
+                headers=self._admin_headers(),  # Autoriza con rol administrador.
+                json=self._update_body(),  # Cuerpo válido de edición.
+            )  # La edición ya se confirmó: no debe presentarse como fallo de escritura ni como 503.
+        self.assertEqual(response.status_code, 500, response.text)  # No debe ser 503 tras el commit.
+        self.assertEqual(response.json()["detail"], "El paquete se actualizó, pero no pudo recuperarse.")  # Mensaje que refleja el commit confirmado.
+
+    def test_public_catalog_returns_503_when_capacity_read_locked(self) -> None:
+        """Un lock de SQLite al leer cupos responde 503 con Retry-After."""
+        self._create_national_package(408)  # Garantiza al menos un paquete en el catálogo público.
+        with patch.object(self.app.state.compra_service, "get_available_capacity", side_effect=sqlite3.OperationalError("database is locked")):  # Simula bloqueo solo en la lectura de disponibilidad.
+            response = self.client.get("/paquetes")  # Invoca el catálogo público real.
+        self.assertEqual(response.status_code, 503, response.text)  # Un lock de cupos es transitorio.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Indica cuándo reintentar.
+
+    def test_public_catalog_returns_500_when_capacity_read_sql_error_is_permanent(self) -> None:
+        """Un error SQLite no transitorio al leer cupos conserva el 500 previsto."""
+        self._create_national_package(409)  # Garantiza al menos un paquete en el catálogo público.
+        with patch.object(self.app.state.compra_service, "get_available_capacity", side_effect=sqlite3.OperationalError("near 'BROKEN': syntax error")):  # Simula un error que no es lock.
+            response = self.client.get("/paquetes")  # Invoca el catálogo público real.
+        self.assertEqual(response.status_code, 500, response.text)  # Un error permanente no es indisponibilidad.
+        self.assertEqual(response.json()["detail"], "No se pudo leer la disponibilidad del paquete.")  # Mensaje estable sin SQL.
+
 
 if __name__ == "__main__":  # Permite ejecutar este módulo de forma directa.
     unittest.main()  # Descubre y ejecuta los casos definidos en la clase.

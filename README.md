@@ -329,6 +329,10 @@ responden `500` con detalle genérico. Si se agotan los intentos, la API respond
 `503` y `Retry-After: 1`; si el cliente usa clave idempotente, debe conservarla
 al reintentar.
 
+Las lecturas del catálogo (`GET /paquetes` y `GET /admin/paquetes`) responden
+`503` con `Retry-After: 1` ante un bloqueo de SQLite; la disponibilidad por
+fecha de `GET /paquetes` sigue el mismo criterio.
+
 Instala las dependencias de ejecución y desarrollo con:
 
 ```powershell

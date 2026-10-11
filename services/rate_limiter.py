@@ -9,6 +9,8 @@ import time  # Proporciona la hora actual cuando una prueba no inyecta una marca
 from contextlib import closing  # Cierra las conexiones SQLite al concluir cada operación.
 from pathlib import Path  # Acepta rutas de base de datos como texto o Path.
 
+from conectar import is_database_locked  # Clasifica bloqueos SQLite con el mismo criterio que el resto de la app.
+
 
 class RateLimiterBusyError(RuntimeError):
     """Indica que la base del limitador permaneció bloqueada y conviene reintentar."""
@@ -138,7 +140,7 @@ class RateLimiter:
                         (current_time,),
                     )
         except sqlite3.OperationalError as error:  # Distingue bloqueos transitorios de fallos permanentes.
-            if self._is_database_locked(error):  # Reconoce solo BUSY/LOCKED como condición reintentable.
+            if is_database_locked(error):  # Reconoce solo BUSY/LOCKED como condición reintentable.
                 raise RateLimiterBusyError("La base del limitador está bloqueada; reintente más tarde.") from error
             raise RateLimiterPersistenceError("No se pudo registrar el límite de solicitudes.") from error
         except sqlite3.Error as error:  # Cualquier otro fallo de SQLite es permanente para esta solicitud.
@@ -147,16 +149,6 @@ class RateLimiter:
         if row is None:
             raise RuntimeError("SQLite no devolvió el resultado del limitador.")  # Evita tratar un resultado incompleto como una petición permitida.
         return bool(row[0])  # Convierte 0/1 de SQLite al veredicto booleano de la API del limitador.
-
-    @staticmethod
-    def _is_database_locked(error: sqlite3.OperationalError) -> bool:
-        """Reconoce solo errores SQLite BUSY/LOCKED, nunca sintaxis u otros fallos."""
-        error_code = getattr(error, "sqlite_errorcode", None)  # Obtiene el código extendido disponible en las versiones actuales de sqlite3.
-        if error_code is not None:  # Prefiere el código estable cuando Python lo proporciona.
-            primary_code = error_code & 0xFF  # SQLite guarda el código primario en los ocho bits inferiores.
-            return primary_code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)  # Solo bloqueos se consideran transitorios.
-        message = str(error).casefold()  # Compatibilidad con runtimes antiguos que no exponen sqlite_errorcode.
-        return "database is locked" in message or "database table is locked" in message  # Usa mensajes exactos conocidos como fallback limitado.
 
     def _ensure_schema(self) -> None:
         """Crea la tabla de conteo y el índice que acelera la limpieza de vencidos."""
