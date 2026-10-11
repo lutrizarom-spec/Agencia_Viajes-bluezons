@@ -1004,6 +1004,84 @@ class ApiEdgeCaseTests(unittest.TestCase):
         self.assertEqual(response.status_code, 500, response.text)  # Un error permanente es 500, no 503.
         self.assertEqual(response.json()["detail"], "No se pudo verificar el límite de solicitudes.")  # Mensaje estable sin SQL.
 
+    def _reservation_with_expired_abono(self) -> tuple[str, str, dict[str, str]]:
+        """Crea una reserva con anticipo confirmado y un abono vencido ya procesado."""
+        self.client.put(  # Prepara dos cupos para el flujo de anticipo más abono.
+            "/admin/paquetes/202/inventario",  # Usa la ruta administrativa real.
+            json={"total_capacity": 2, "travel_date": TRAVEL_DATE_JSON},  # Retiene una plaza y deja otra disponible.
+            headers=self._admin_headers(),  # Autoriza la configuración de inventario.
+        )
+        client_headers = self._client_headers()  # Conserva la identidad del titular.
+        purchase = self.client.post(  # Genera la reserva y su anticipo pendiente.
+            "/reservas",  # Ejecuta la compra local protegida.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Solicita una plaza.
+            headers=client_headers,  # Asocia la compra al cliente del fixture.
+        )
+        self.assertEqual(purchase.status_code, 201, purchase.text)  # Exige que la reserva se haya creado.
+        receipt = purchase.json()  # Conserva identificadores del recibo y del anticipo.
+        initial = self.client.post(  # Confirma el anticipo para habilitar abonos posteriores.
+            f"/admin/reservas/{receipt['reservation_id']}/pago",  # Resuelve el pago inicial.
+            json={"payment_id": receipt["payment_id"], "status": "confirmed"},  # Marca el anticipo como confirmado.
+            headers=self._admin_headers(),  # Solo administración simula resultados.
+        )
+        self.assertEqual(initial.status_code, 200, initial.text)  # Verifica la transición previa.
+        abono = self.client.post(  # Registra el abono que se forzará a vencer.
+            f"/reservas/{receipt['reservation_id']}/pagos",  # Crea un intento parcial dentro del saldo.
+            json={"amount": 1000.0},  # Monto pequeño y válido dentro del saldo pendiente.
+            headers={**client_headers, "X-Idempotency-Key": "expired-abono-key"},  # Clave estable para el replay.
+        )
+        self.assertEqual(abono.status_code, 201, abono.text)  # Exige el pago pendiente creado.
+        abono_id = abono.json()["payment_id"]  # Conserva el identificador del abono a vencer.
+        old_deadline = "2000-01-01T00:00:00+00:00"  # Fuerza un vencimiento pasado determinista.
+        with closing(sqlite3.connect(self.database_path)) as connection:  # Ajusta solo el deadline del fixture.
+            with connection:  # Confirma el cambio de reloj de prueba.
+                connection.execute(  # Vuelve antiguo únicamente el vencimiento del abono.
+                    "UPDATE payments SET expires_at = ? WHERE payment_id = ?",
+                    (old_deadline, abono_id),
+                )
+        service = self.app.state.compra_service  # Accede al servicio real compartido por la API.
+        self.assertEqual(service.expire_pending_payments(), 1)  # Solo vence el abono, no el anticipo confirmado.
+        return receipt["reservation_id"], abono_id, client_headers  # Habilita las aserciones del escenario.
+
+    def test_expired_payment_reports_same_status_via_get_and_idempotent_replay(self) -> None:
+        """GET y el replay con la misma clave deben coincidir para un pago vencido."""
+        reservation_id, abono_id, client_headers = self._reservation_with_expired_abono()
+        listed = self.client.get(f"/reservas/{reservation_id}/pagos", headers=client_headers)  # Consulta el historial del titular.
+        self.assertEqual(listed.status_code, 200, listed.text)  # Exige lectura correcta del historial.
+        expired = next(p for p in listed.json() if p["payment_id"] == abono_id)  # Ubica el abono vencido.
+        self.assertEqual(expired["status"], "expired")  # La lectura deriva el estado vencido.
+        replay = self.client.post(  # Reenvía el mismo abono con la misma clave idempotente.
+            f"/reservas/{reservation_id}/pagos",  # Ruta de creación de pagos parciales.
+            json={"amount": 1000.0},  # Conserva el mismo monto asociado a la clave.
+            headers={**client_headers, "X-Idempotency-Key": "expired-abono-key"},  # Reutiliza clave y titular originales.
+        )
+        self.assertEqual(replay.json()["payment_id"], abono_id)  # Recupera el pago existente sin crear otro.
+        self.assertEqual(replay.json()["status"], expired["status"])  # F5: GET y replay deben coincidir.
+        self.assertEqual(self.client.get("/paquetes").json()[0]["cupos_disponibles"], 1)  # No altera el inventario.
+
+    def test_repeating_failed_on_expired_payment_is_idempotent(self) -> None:
+        """Repetir el resultado failed de un pago vencido no debe ser un conflicto."""
+        reservation_id, abono_id, _ = self._reservation_with_expired_abono()  # Prepara el pago vencido.
+        repeated = self.client.post(  # Reenvía el mismo resultado terminal sobre el pago vencido.
+            f"/admin/reservas/{reservation_id}/pago",  # Ruta administrativa de transición.
+            json={"payment_id": abono_id, "status": "failed"},  # Solicita el resultado ya aplicado.
+            headers=self._admin_headers(),  # Autoriza la simulación administrativa.
+        )
+        self.assertEqual(repeated.status_code, 200, repeated.text)  # F5: repetir failed debe ser idempotente.
+        self.assertEqual(repeated.json()["status"], "expired")  # Reporta el estado efectivo del pago vencido.
+        self.assertEqual(self.client.get("/paquetes").json()[0]["cupos_disponibles"], 1)  # Sin liberar cupos.
+
+    def test_expired_payment_cannot_be_confirmed(self) -> None:
+        """Un pago vencido sigue rechazando una confirmación administrativa tardía."""
+        reservation_id, abono_id, _ = self._reservation_with_expired_abono()  # Prepara el pago vencido.
+        conflict = self.client.post(  # Intenta revertir el vencimiento a confirmado.
+            f"/admin/reservas/{reservation_id}/pago",  # Ruta administrativa de transición.
+            json={"payment_id": abono_id, "status": "confirmed"},  # Resultado no permitido desde un estado terminal.
+            headers=self._admin_headers(),  # Autoriza la simulación administrativa.
+        )
+        self.assertEqual(conflict.status_code, 409, conflict.text)  # Conserva el rechazo documentado.
+        self.assertEqual(self.client.get("/paquetes").json()[0]["cupos_disponibles"], 1)  # El conflicto no cambia inventario.
+
 
 if __name__ == "__main__":  # Permite ejecutar estos casos directamente con Python.
     unittest.main()  # Ejecuta los casos de borde registrados en la clase.

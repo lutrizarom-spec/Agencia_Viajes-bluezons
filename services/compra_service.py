@@ -803,7 +803,8 @@ class CompraService:
                 if normalized_key is not None:
                     previous = connection.execute(
                         """
-                        SELECT payment_id, reservation_id, amount_minor, status,
+                        SELECT payment_id, reservation_id, amount_minor,
+                               CASE WHEN expired_at IS NOT NULL THEN 'expired' ELSE status END,
                                created_at, updated_at, expires_at, request_hash
                         FROM payments
                         WHERE reservation_id = ? AND idempotency_key = ?
@@ -1009,6 +1010,9 @@ class CompraService:
                 if row[3] == target_status and row[10] is None:  # Repetir el mismo resultado no vencido es seguro ante reintentos de red.
                     connection.commit()  # Finaliza la lectura transaccional sin volver a modificar inventario.
                     return self._payment_from_row((*row[:6], row[9]))  # Reproduce el mismo pago terminal.
+                if row[10] is not None and target_status == "failed":  # Repetir "failed" sobre un pago vencido no debe reabrir un conflicto.
+                    connection.commit()  # Un pago vencido ya es terminal; no se modifica inventario ni estado.
+                    return self._payment_from_row((row[0], row[1], row[2], "expired", row[4], row[5], row[9]))  # Informa el estado efectivo del vencimiento.
                 if row[3] == "pending" and row[9] <= datetime.now(UTC).isoformat():  # Cierra la carrera en que vence tras el barrido previo.
                     raise PaymentTransitionConflictError("El plazo de pago venció y no se puede resolver manualmente.")  # El siguiente barrido libera sus cupos.
                 if row[3] != "pending":  # Confirmado y fallido son estados terminales del flujo local.
