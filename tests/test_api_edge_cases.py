@@ -221,6 +221,45 @@ class ApiEdgeCaseTests(unittest.TestCase):
         hidden_payment = self.client.get(f"/reservas/{reservation_id}/pago", headers=self._client_headers())  # Comprueba que el estado de pago también respeta la propiedad.
         self.assertEqual(hidden_payment.status_code, 404)  # Evita revelar pagos de otros clientes.
 
+    def test_foreign_client_gets_404_on_payment_routes(self) -> None:
+        """Un cliente ajeno recibe 404 al consultar, listar o abonar pagos de otra reserva."""
+        self.app.state.auth_service.create_user(  # Aprovisiona el propietario real de la reserva.
+            "11.111.111-1", "tercer-cliente-seguro-2026", UserRole.CLIENTE
+        )  # Persiste una identidad distinta a la del cliente del fixture.
+        self.client.put(  # Habilita inventario para que el propietario pueda reservar.
+            "/admin/paquetes/202/inventario",  # Reutiliza la operación administrativa de capacidad.
+            json={"total_capacity": 2, "travel_date": TRAVEL_DATE_JSON},  # Deja capacidad suficiente para una reserva.
+            headers=self._admin_headers(),  # Autoriza al rol administrador.
+        )  # La capacidad queda disponible para el propietario legítimo.
+        owner_login = self.client.post(  # Autentica al propietario real de la reserva.
+            "/auth/login",  # Emite JWT por la ruta normal.
+            json={"rut": "11.111.111-1", "password": "tercer-cliente-seguro-2026"},  # Usa credenciales válidas del propietario.
+        )  # Devuelve el token del propietario.
+        owner_headers = {"Authorization": f"Bearer {owner_login.json()['access_token']}"}  # Construye credenciales del propietario.
+        purchase = self.client.post(  # Crea la reserva y su pago inicial pendiente.
+            "/reservas",  # La ruta toma el RUT desde el JWT del propietario.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Reserva un cupo para el propietario.
+            headers=owner_headers,  # Asocia el recibo al propietario legítimo.
+        )  # Registra la reserva con su pago pendiente.
+        self.assertEqual(purchase.status_code, 201)  # Confirma que la reserva del propietario quedó creada.
+        reservation_id = purchase.json()["reservation_id"]  # Conserva el UUID cuyo pago intentará ver un ajeno.
+
+        foreign_headers = self._client_headers()  # Presenta una identidad que no es propietaria.
+        get_payment = self.client.get(  # Intenta consultar el estado de pago ajeno.
+            f"/reservas/{reservation_id}/pago", headers=foreign_headers  # Usa la ruta real de consulta de pago.
+        )  # La propiedad se comprueba dentro del servicio.
+        list_payments = self.client.get(  # Intenta listar los pagos de la reserva ajena.
+            f"/reservas/{reservation_id}/pagos", headers=foreign_headers  # Usa la ruta real de historial de pagos.
+        )  # El listado no debe revelar la reserva de otra cuenta.
+        create_payment = self.client.post(  # Intenta crear un abono sobre la reserva ajena.
+            f"/reservas/{reservation_id}/pagos",  # Usa la ruta real de creación de pagos.
+            json={"amount": 1000},  # Envía un monto válido para aislar la comprobación de propiedad.
+            headers=foreign_headers,  # Presenta la identidad no propietaria.
+        )  # La comprobación de titularidad ocurre antes de validar saldo o estado.
+        self.assertEqual(get_payment.status_code, 404)  # Oculta el pago de la reserva ajena.
+        self.assertEqual(list_payments.status_code, 404)  # Oculta el historial de pagos ajeno.
+        self.assertEqual(create_payment.status_code, 404)  # Impide abonar a reservas de otros clientes.
+
     def test_outbox_operational_routes_are_admin_only(self) -> None:
         customer_list = self.client.get("/admin/outbox", headers=self._client_headers())
         self.assertEqual(customer_list.status_code, 403)
