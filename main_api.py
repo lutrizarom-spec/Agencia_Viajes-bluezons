@@ -740,6 +740,11 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
         except PaymentIdempotencyConflictError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        except DatabaseBusyError as error:  # Informa bloqueo temporal tras agotar los reintentos acotados.
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error), headers={"Retry-After": "1"}) from error
+        except PurchasePersistenceError as error:  # No expone SQL ni registra el pago como exitoso.
+            logger.exception("No se pudo persistir el pago de la reserva %s.", reservation_id)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo persistir el pago.") from error
         except ValueError as error:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
         except sqlite3.Error as error:

@@ -497,6 +497,73 @@ class ApiEdgeCaseTests(unittest.TestCase):
             service.transition_payment(pending_id, "confirmed")  # El servicio conserva su estado expired y la plaza ya liberada.
         self.assertEqual(service.get_available_capacity(202), 1)  # El intento tardío no modifica inventario.
 
+    def _confirmed_reservation_without_pending_payment(self) -> str:
+        """Crea una reserva con su pago inicial confirmado y sin pagos pendientes."""
+        self.client.put(  # Asegura cupos suficientes para confirmar un abono inicial.
+            "/admin/paquetes/202/inventario",  # Usa la ruta administrativa real.
+            json={"total_capacity": 2, "travel_date": TRAVEL_DATE_JSON},  # Retiene una plaza para el pago posterior.
+            headers=self._admin_headers(),  # Autoriza la configuración de inventario.
+        )  # Persiste la capacidad de la fecha de viaje.
+        purchase = self.client.post(  # Genera la reserva y su pago inicial pendiente.
+            "/reservas",  # Ejecuta la compra local protegida.
+            json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Solicita una plaza.
+            headers=self._client_headers(),  # Usa la cuenta cliente titular.
+        )  # Devuelve el recibo con el pago inicial.
+        self.assertEqual(purchase.status_code, 201, purchase.text)  # Exige que la reserva se haya creado.
+        receipt = purchase.json()  # Conserva identificadores para resolver el pago.
+        confirmation = self.client.post(  # Confirma el pago inicial dejando saldo pendiente.
+            f"/admin/reservas/{receipt['reservation_id']}/pago",  # Resuelve el pago creado junto a la reserva.
+            json={"payment_id": receipt["payment_id"], "status": "confirmed"},  # Marca el abono inicial como confirmado.
+            headers=self._admin_headers(),  # Solo un administrador simula el proveedor.
+        )  # Deja la reserva activa sin pagos pendientes.
+        self.assertEqual(confirmation.status_code, 200, confirmation.text)  # Verifica la transición previa.
+        return receipt["reservation_id"]  # Habilita crear un pago parcial adicional.
+
+    def test_create_payment_returns_503_when_insert_keeps_locked(self) -> None:
+        """La inserción bloqueada agota reintentos y responde 503 con Retry-After."""
+        reservation_id = self._confirmed_reservation_without_pending_payment()  # Parte de una reserva que admite otro abono.
+        service = self.app.state.compra_service  # Usa el servicio real compartido por la API.
+        with patch.object(service, "expire_pending_payments"), patch.object(service, "_connect") as connect, patch("services.compra_service.time.sleep") as sleep:  # Aísla el barrido y simula el lock de escritura.
+            connect.return_value.execute.side_effect = sqlite3.OperationalError("database is locked")  # Fuerza BUSY en cada intento de inserción.
+            response = self.client.post(  # Solicita el pago parcial a través del endpoint real.
+                f"/reservas/{reservation_id}/pagos",  # Ruta de creación de pagos.
+                json={"amount": 1000.0},  # Monto dentro del saldo pendiente.
+                headers=self._client_headers(),  # Identidad del titular de la reserva.
+            )  # Ejecuta el camino de reintentos del servicio.
+        self.assertEqual(response.status_code, 503, response.text)  # Exige indisponibilidad temporal y no un 500.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Informa cuándo reintentar.
+        sleep.assert_called()  # Comprueba que se aplicó el backoff acotado.
+
+    def test_create_payment_returns_503_when_expire_reports_busy(self) -> None:
+        """Un DatabaseBusyError del barrido previo también responde 503 con Retry-After."""
+        reservation_id = self._confirmed_reservation_without_pending_payment()  # Prepara una reserva con saldo.
+        service = self.app.state.compra_service  # Servicio real de la aplicación.
+        with patch.object(service, "expire_pending_payments", side_effect=DatabaseBusyError("La base de datos sigue ocupada al expirar pagos.")):  # Simula que el barrido agotó sus reintentos.
+            response = self.client.post(  # Invoca el endpoint de creación de pago.
+                f"/reservas/{reservation_id}/pagos",  # Ruta de pagos parciales.
+                json={"amount": 1000.0},  # Solicitud válida para aislar el error del barrido.
+                headers=self._client_headers(),  # Titular autenticado.
+            )  # El error de dominio no debe escapar como 500.
+        self.assertEqual(response.status_code, 503, response.text)  # Exige indisponibilidad temporal.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Conserva la indicación de reintento.
+
+    def test_create_payment_translates_permanent_sql_error_to_domain(self) -> None:
+        """Un OperationalError no transitorio se traduce y no activa reintentos."""
+        reservation_id = self._confirmed_reservation_without_pending_payment()  # Proporciona una reserva válida.
+        service = self.app.state.compra_service  # Servicio real usado por el endpoint.
+        with patch.object(service, "expire_pending_payments"), patch.object(service, "_connect") as connect, patch("services.compra_service.time.sleep") as sleep:  # Aísla el barrido y simula un error SQL permanente.
+            connect.return_value.execute.side_effect = sqlite3.OperationalError("near 'BROKEN': syntax error")  # Representa un fallo que no es lock.
+            with self.assertRaises(PurchasePersistenceError):  # El servicio debe traducir el error crudo a dominio.
+                service.create_payment(reservation_id, "10.000.013-K", 1000.0)  # Llama al servicio directamente para observar la excepción.
+            response = self.client.post(  # Repite por HTTP para verificar el contrato del endpoint.
+                f"/reservas/{reservation_id}/pagos",  # Ruta de pagos parciales.
+                json={"amount": 1000.0},  # Mismo monto válido.
+                headers=self._client_headers(),  # Titular autenticado.
+            )  # El endpoint no debe exponer el SQL.
+        self.assertEqual(response.status_code, 500, response.text)  # Un error permanente es 500, no 503.
+        self.assertEqual(response.json()["detail"], "No se pudo persistir el pago.")  # Mensaje estable sin SQL.
+        sleep.assert_not_called()  # Un error no transitorio no reintenta.
+
     def test_fastapi_worker_expires_payments_periodically(self) -> None:
         """Lifespan barre expirados al iniciar y continúa haciéndolo periódicamente."""
         self.client.put(  # Prepara una plaza que quedará retenida por pago pendiente.

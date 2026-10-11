@@ -745,7 +745,37 @@ class CompraService:
         idempotency_key: str | None = None,
     ) -> PaymentReceipt:
         """Crea un pago parcial dentro del saldo, con un único intento pendiente."""
-        self.expire_pending_payments()
+        self.expire_pending_payments()  # Aplica vencimientos pendientes antes de aceptar un nuevo intento de pago.
+        for attempt in range(1, self._max_write_attempts + 1):  # Reutiliza la política limitada de retry de escrituras del servicio.
+            try:  # Repite únicamente bloqueos transitorios de SQLite.
+                return self._create_payment_once(  # Registra el pago pendiente de forma atómica en un solo intento.
+                    reservation_id,
+                    rut,
+                    amount,
+                    is_admin=is_admin,
+                    idempotency_key=idempotency_key,
+                )  # Devuelve el recibo del pago recién creado.
+            except sqlite3.OperationalError as error:  # Distingue un lock de otros errores SQL permanentes.
+                if not self._is_database_locked(error):  # Evita reintentar sintaxis, disco u otros fallos.
+                    raise PurchasePersistenceError("SQLite rechazó la creación del pago.") from error  # Traduce el error técnico a dominio.
+                if attempt == self._max_write_attempts:  # Comprueba si ya se agotó el presupuesto de reintentos.
+                    raise DatabaseBusyError("La base de datos sigue ocupada; reintente la creación del pago.") from error  # Informa indisponibilidad temporal.
+                time.sleep(self._retry_delay_seconds * attempt)  # Espera brevemente antes de repetir la transacción.
+            except sqlite3.IntegrityError as error:  # No clasifica violaciones de esquema como bloqueos reintentables.
+                raise PurchasePersistenceError("La creación del pago incumplió una restricción de persistencia.") from error  # Expone un fallo de persistencia controlado.
+
+        raise DatabaseBusyError("No fue posible adquirir la base de datos para crear el pago.")  # Salvaguarda del bucle acotado.
+
+    def _create_payment_once(
+        self,
+        reservation_id: str,
+        rut: str,
+        amount: float | Decimal,
+        *,
+        is_admin: bool = False,
+        idempotency_key: str | None = None,
+    ) -> PaymentReceipt:
+        """Inserta en un único intento un pago pendiente dentro del saldo."""
         normalized_rut = normalize_rut(rut)
         if isinstance(amount, bool) or not isinstance(amount, (int, float, Decimal)):
             raise ValueError("El monto del pago debe ser finito y mayor que cero.")
