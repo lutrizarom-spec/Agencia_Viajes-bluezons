@@ -344,6 +344,15 @@ Las lecturas del catálogo (`GET /paquetes` y `GET /admin/paquetes`) responden
 `503` con `Retry-After: 1` ante un bloqueo de SQLite; la disponibilidad por
 fecha de `GET /paquetes` sigue el mismo criterio.
 
+La misma política de bloqueos cubre el inventario administrativo y las lecturas
+de reservas y pagos: `PUT /admin/paquetes/{package_code}/inventario`,
+`GET /reservas`, `GET /reservas/{reservation_id}/pago` y
+`GET /reservas/{reservation_id}/pagos`. Ante un bloqueo transitorio reintentan
+de forma acotada con la política anterior y, si se agotan los intentos,
+responden `503` con `Retry-After: 1`. Los errores SQL permanentes no se
+reintentan y se devuelven como `500` con detalle genérico, sin exponer mensajes
+internos de SQLite.
+
 Instala las dependencias de ejecución y desarrollo con:
 
 ```powershell

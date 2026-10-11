@@ -299,6 +299,16 @@ def _package_persistence_http_error(
     return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail)  # Conserva el 500 y su detalle actual.
 
 
+def _service_persistence_http_error(
+    error: Exception, *, log_message: str, detail: str
+) -> HTTPException:
+    """Traduce errores de dominio del servicio: bloqueo agotado a 503 con reintento, resto a 500."""
+    if isinstance(error, DatabaseBusyError):  # El servicio agotó sus reintentos por SQLITE_BUSY o SQLITE_LOCKED.
+        return HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error), headers={"Retry-After": "1"})  # No expone SQL y permite reintentar la misma solicitud.
+    logger.exception(log_message)  # Registra el diagnóstico del fallo no transitorio.
+    return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail)  # Devuelve un 500 controlado sin detalles internos.
+
+
 def create_app(
     database_path: str | Path | None = None,
     *,
@@ -650,6 +660,10 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error  # Informa que no se encontró el recurso.
         except CapacityBelowReservedError as error:  # Impide reducir capacidad por debajo de lo ya confirmado.
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error  # Informa conflicto con reservas existentes.
+        except (DatabaseBusyError, PurchasePersistenceError) as error:  # Traduce bloqueos agotados y fallos de persistencia del servicio.
+            raise _service_persistence_http_error(error, log_message=f"No se pudo configurar el inventario del paquete {package_code}.", detail="No se pudo configurar el inventario.") from error
+        except sqlite3.Error as error:  # Defensa en profundidad para SQLite crudo que escape del servicio.
+            raise _package_persistence_http_error(error, log_message=f"No se pudo configurar el inventario del paquete {package_code}.", detail="No se pudo configurar el inventario.") from error
         return InventoryResponse(package_code=package_code, travel_date=payload.travel_date, available_capacity=available)  # Devuelve la fecha y disponibilidad resultante.
 
     @app.post("/reservas", response_model=ReservationResponse, status_code=status.HTTP_201_CREATED, tags=["Reservas"])  # Publica una compra que requiere JWT.
@@ -695,7 +709,12 @@ def create_app(
         identity: Annotated[UserIdentity, Depends(current_user)],  # Exige token válido para consultar información personal.
     ) -> list[ReservationResponse]:
         """Lista las reservas del RUT autenticado, sin permitir consultar otras cuentas."""
-        receipts = compra_service.list_reservations(identity.rut)  # Filtra en SQLite usando el subject normalizado del token.
+        try:  # Traduce bloqueos de lectura agotados y fallos de persistencia del servicio.
+            receipts = compra_service.list_reservations(identity.rut)  # Filtra en SQLite usando el subject normalizado del token.
+        except (DatabaseBusyError, PurchasePersistenceError) as error:
+            raise _service_persistence_http_error(error, log_message=f"No se pudieron leer las reservas de {identity.rut}.", detail="No se pudieron leer las reservas.") from error
+        except sqlite3.Error as error:  # Defensa en profundidad para SQLite crudo que escape del servicio.
+            raise _package_persistence_http_error(error, log_message="No se pudieron leer las reservas.", detail="No se pudieron leer las reservas.") from error
         return [ReservationResponse(**receipt.__dict__) for receipt in receipts]  # Convierte recibos propios al contrato HTTP.
 
     @app.get("/admin/reservas", response_model=list[ReservationResponse], tags=["Administración"])  # Ofrece consulta global solo a administradores.
@@ -747,6 +766,10 @@ def create_app(
             )  # Devuelve el último estado local persistido.
         except ReservationNotFoundError as error:  # No diferencia entre reserva inexistente y ajena.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error  # Evita filtrar existencia de otras cuentas.
+        except (DatabaseBusyError, PurchasePersistenceError) as error:  # Traduce bloqueos agotados y fallos de persistencia del servicio.
+            raise _service_persistence_http_error(error, log_message=f"No se pudo leer el pago de la reserva {reservation_id}.", detail="No se pudo leer el pago.") from error
+        except sqlite3.Error as error:  # Defensa en profundidad para SQLite crudo que escape del servicio.
+            raise _package_persistence_http_error(error, log_message=f"No se pudo leer el pago de la reserva {reservation_id}.", detail="No se pudo leer el pago.") from error
         return PaymentResponse(**payment.__dict__)  # Serializa los campos sin exponer datos financieros sensibles.
 
     @app.get("/reservas/{reservation_id}/pagos", response_model=list[PaymentResponse], tags=["Pagos locales"])
@@ -763,6 +786,10 @@ def create_app(
             )
         except ReservationNotFoundError as error:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+        except (DatabaseBusyError, PurchasePersistenceError) as error:  # Traduce bloqueos agotados y fallos de persistencia del servicio.
+            raise _service_persistence_http_error(error, log_message=f"No se pudieron leer los pagos de la reserva {reservation_id}.", detail="No se pudieron leer los pagos.") from error
+        except sqlite3.Error as error:  # Defensa en profundidad para SQLite crudo que escape del servicio.
+            raise _package_persistence_http_error(error, log_message=f"No se pudieron leer los pagos de la reserva {reservation_id}.", detail="No se pudieron leer los pagos.") from error
         return [PaymentResponse(**payment.__dict__) for payment in payments]
 
     @app.post(

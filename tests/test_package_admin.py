@@ -349,5 +349,43 @@ class PackageAdminApiTests(unittest.TestCase):
         self.assertEqual(response.json()["detail"], "No se pudo leer la disponibilidad del paquete.")  # Mensaje estable sin SQL.
 
 
+    def test_configure_inventory_returns_503_when_write_locked(self) -> None:
+        """Un lock de SQLite al configurar cupos debería responder 503 con Retry-After."""
+        self._create_national_package(410)  # Deja un paquete activo para la ruta de inventario.
+        raw_client = TestClient(self.app, raise_server_exceptions=False)  # Observa el contrato HTTP en vez de una excepción cruda.
+        self.addCleanup(raw_client.close)  # Cierra el cliente auxiliar tras la prueba.
+        with patch.object(  # Simula el lock en el límite del servicio; no ejercita los reintentos internos.
+            self.app.state.compra_service,  # Servicio compartido por la API.
+            "configure_capacity",  # Ruta de escritura de inventario bajo prueba.
+            side_effect=sqlite3.OperationalError("database is locked"),  # Fuerza el bloqueo transitorio.
+        ):
+            response = raw_client.put(  # Invoca la ruta administrativa real de inventario.
+                "/admin/paquetes/410/inventario",  # Endpoint PUT de cupos.
+                headers=self._admin_headers(),  # Autoriza con rol administrador.
+                json={"travel_date": TRAVEL_DATE_JSON, "total_capacity": 5},  # Cuerpo válido de inventario.
+            )  # El bloqueo debería traducirse en indisponibilidad temporal.
+        self.assertEqual(response.status_code, 503, response.text)  # Esperado 503; hoy se observa el comportamiento real.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Conserva la indicación de reintento.
+
+    def test_configure_inventory_returns_500_when_sql_error_is_permanent(self) -> None:
+        """Un error SQL no transitorio responde 500 y no filtra detalles internos."""
+        self._create_national_package(411)  # Deja un paquete activo para la ruta de inventario.
+        raw_client = TestClient(self.app, raise_server_exceptions=False)  # Permite observar la respuesta HTTP del fallo.
+        self.addCleanup(raw_client.close)  # Cierra el cliente auxiliar tras la prueba.
+        with patch.object(  # Simula un error de SQL que no es un bloqueo.
+            self.app.state.compra_service,  # Servicio compartido por la API.
+            "configure_capacity",  # Ruta de escritura de inventario bajo prueba.
+            side_effect=sqlite3.OperationalError("near 'BROKEN': syntax error"),  # Error permanente del motor.
+        ):
+            response = raw_client.put(  # Invoca la ruta administrativa real de inventario.
+                "/admin/paquetes/411/inventario",  # Endpoint PUT de cupos.
+                headers=self._admin_headers(),  # Autoriza con rol administrador.
+                json={"travel_date": TRAVEL_DATE_JSON, "total_capacity": 5},  # Cuerpo válido de inventario.
+            )  # Un error permanente no debe presentarse como indisponibilidad.
+        self.assertEqual(response.status_code, 500, response.text)  # Conserva el 500 para fallos no transitorios.
+        self.assertNotIn("BROKEN", response.text)  # No expone el detalle interno de SQL.
+        self.assertNotIn("syntax error", response.text)  # Tampoco el mensaje crudo del motor.
+
+
 if __name__ == "__main__":  # Permite ejecutar este módulo de forma directa.
     unittest.main()  # Descubre y ejecuta los casos definidos en la clase.

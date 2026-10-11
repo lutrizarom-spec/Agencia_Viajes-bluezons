@@ -1011,6 +1011,65 @@ class ApiEdgeCaseTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503, response.text)  # Indisponibilidad temporal, no 500.
         self.assertEqual(response.headers.get("Retry-After"), "1")  # Conserva la indicación de reintento documentada.
 
+    def test_configure_capacity_retries_locks_then_reports_busy(self) -> None:
+        """La escritura de inventario reintenta bloqueos transitorios y agota el límite configurado."""
+        service = CompraService(self.database_path, max_write_attempts=3, retry_delay_seconds=0.01)  # Política corta y determinista.
+        with patch.object(  # Cada intento de conexión se topa con el lock simulado.
+            service, "_connect", side_effect=sqlite3.OperationalError("database is locked")
+        ), patch("services.compra_service.time.sleep") as sleep:  # Espía pausas sin hacerlas reales.
+            with self.assertRaises(DatabaseBusyError):  # Tras agotar los intentos debe señalarse indisponibilidad.
+                service.configure_capacity(202, TRAVEL_DATE, 5)  # Intenta configurar cupos durante el lock.
+        self.assertEqual(sleep.call_count, 2)  # Tres intentos producen dos pausas intermedias.
+
+    def test_configure_capacity_does_not_retry_permanent_sql_error(self) -> None:
+        """Un error SQL permanente no se reintenta ni se confunde con un bloqueo."""
+        service = CompraService(self.database_path, max_write_attempts=3, retry_delay_seconds=0.01)  # Varios intentos para detectar reintentos indebidos.
+        with patch.object(  # Simula un error que no es lock.
+            service, "_connect", side_effect=sqlite3.OperationalError("near 'BROKEN': syntax error")
+        ), patch("services.compra_service.time.sleep") as sleep:  # Vigila que no haya backoff.
+            with self.assertRaises(PurchasePersistenceError):  # Se espera un error de persistencia controlado.
+                service.configure_capacity(202, TRAVEL_DATE, 5)  # Configura cupos con el error permanente.
+        sleep.assert_not_called()  # Un error permanente no activa reintentos.
+
+    def test_configure_capacity_retry_recovers_and_persists_inventory(self) -> None:
+        """Tras un lock, el segundo intento configura el inventario exactamente una vez."""
+        service = CompraService(self.database_path, max_write_attempts=3, retry_delay_seconds=0.01)  # Política que permite un reintento exitoso.
+        real_connect = service._connect  # Conserva la conexión real para el segundo intento.
+        attempts = [0]  # Cuenta los intentos de conexión.
+
+        def flaky_connect() -> sqlite3.Connection:
+            """Falla la primera conexión y luego delega en la implementación real."""
+            attempts[0] += 1  # Registra cada intento.
+            if attempts[0] == 1:  # Solo el primer intento representa el lock transitorio.
+                raise sqlite3.OperationalError("database is locked")  # Simula el bloqueo recuperable.
+            return real_connect()  # Reintenta con una conexión real.
+
+        with patch.object(service, "_connect", side_effect=flaky_connect), patch("services.compra_service.time.sleep"):  # Ejecuta el retry sin esperas reales.
+            available = service.configure_capacity(202, TRAVEL_DATE, 5)  # Configura cinco cupos sobreviviendo al lock.
+        self.assertEqual(attempts[0], 2)  # Comprueba que hubo exactamente un reintento.
+        self.assertEqual(available, 5)  # El resultado refleja la capacidad configurada.
+        self.assertEqual(service.get_available_capacity(202, TRAVEL_DATE), 5)  # El inventario quedó persistido una sola vez.
+
+    def test_locked_read_retries_then_reports_busy(self) -> None:
+        """Una lectura bloqueada reintenta de forma acotada y termina en indisponibilidad."""
+        service = CompraService(self.database_path, max_write_attempts=3, retry_delay_seconds=0.01)  # Política corta y determinista.
+        with patch.object(  # Fuerza el lock en la conexión de la lectura.
+            service, "_connect", side_effect=sqlite3.OperationalError("database is locked")
+        ), patch("services.compra_service.time.sleep") as sleep:  # Espía pausas sin hacerlas reales.
+            with self.assertRaises(DatabaseBusyError):  # La lectura agotada debe traducirse a indisponibilidad.
+                service.list_reservations("10.000.013-K")  # Lista reservas propias durante el lock.
+        self.assertEqual(sleep.call_count, 2)  # Respeta el máximo de intentos configurado.
+
+    def test_locked_read_permanent_error_is_not_retried(self) -> None:
+        """Una lectura con error SQL permanente se traduce sin reintentos."""
+        service = CompraService(self.database_path, max_write_attempts=3, retry_delay_seconds=0.01)  # Varios intentos para detectar reintentos indebidos.
+        with patch.object(  # Simula un error que no es lock.
+            service, "_connect", side_effect=sqlite3.OperationalError("near 'BROKEN': syntax error")
+        ), patch("services.compra_service.time.sleep") as sleep:  # Vigila que no haya backoff.
+            with self.assertRaises(PurchasePersistenceError):  # Se espera un error de persistencia controlado.
+                service.list_reservations("10.000.013-K")  # Lista reservas con el error permanente.
+        sleep.assert_not_called()  # Un error permanente no reintenta la lectura.
+
     def test_rate_limiter_translates_locked_operational_error(self) -> None:
         """Un lock de SQLite se traduce a RateLimiterBusyError."""
         limiter = RateLimiter(self.database_path)  # Reutiliza la base temporal ya inicializada.
@@ -1141,6 +1200,89 @@ class ApiEdgeCaseTests(unittest.TestCase):
         )
         self.assertEqual(conflict.status_code, 409, conflict.text)  # Conserva el rechazo documentado.
         self.assertEqual(self.client.get("/paquetes").json()[0]["cupos_disponibles"], 1)  # El conflicto no cambia inventario.
+
+
+    def test_list_my_reservations_locked_read_is_not_translated(self) -> None:
+        """Hipótesis (regla general de AGENTS.md): un lock en GET /reservas debería dar 503.
+
+        El README no enumera esta lectura entre las que responden 503, por lo que
+        la decisión de contrato queda pendiente; esta prueba registra la brecha.
+        """
+        service = self.app.state.compra_service  # Servicio real compartido por la API.
+        headers = self._client_headers()  # Identidad cliente válida del fixture.
+        raw_client = TestClient(self.app, raise_server_exceptions=False)  # Observa el contrato HTTP en vez de la excepción cruda.
+        self.addCleanup(raw_client.close)  # Cierra el cliente auxiliar.
+        with patch.object(  # Simula el lock solo en la lectura de reservas del titular.
+            service, "list_reservations", side_effect=sqlite3.OperationalError("database is locked")
+        ):
+            response = raw_client.get("/reservas", headers=headers)  # Invoca la lectura protegida real.
+        self.assertEqual(response.status_code, 503, response.text)  # Esperado según la regla general; hoy la brecha se observa.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Conserva la indicación de reintento.
+        self.assertNotIn("database is locked", response.text)  # No expone el mensaje interno del motor.
+
+    def test_get_reservation_payment_locked_read_is_not_translated(self) -> None:
+        """Hipótesis (regla general de AGENTS.md): un lock en GET .../pago debería dar 503.
+
+        El README no enumera esta lectura entre las que responden 503; la decisión
+        de contrato queda pendiente y esta prueba registra la brecha.
+        """
+        service = self.app.state.compra_service  # Servicio real compartido por la API.
+        headers = self._client_headers()  # Identidad cliente válida del fixture.
+        raw_client = TestClient(self.app, raise_server_exceptions=False)  # Observa el contrato HTTP en vez de la excepción cruda.
+        self.addCleanup(raw_client.close)  # Cierra el cliente auxiliar.
+        with patch.object(  # Simula el lock solo en la consulta de pago.
+            service, "get_payment", side_effect=sqlite3.OperationalError("database is locked")
+        ):
+            response = raw_client.get(  # Invoca la lectura protegida real de pago.
+                "/reservas/00000000-0000-0000-0000-000000000000/pago",  # Identificador de ruta con formato válido.
+                headers=headers,  # Identidad titular.
+            )  # El patrón aísla el lock sin depender de una reserva existente.
+        self.assertEqual(response.status_code, 503, response.text)  # Esperado según la regla general; hoy la brecha se observa.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Conserva la indicación de reintento.
+        self.assertNotIn("database is locked", response.text)  # No expone el mensaje interno del motor.
+
+    def test_list_reservation_payments_locked_read_is_not_translated(self) -> None:
+        """Hipótesis (regla general de AGENTS.md): un lock en GET .../pagos debería dar 503.
+
+        El README no enumera esta lectura entre las que responden 503; la decisión
+        de contrato queda pendiente y esta prueba registra la brecha.
+        """
+        service = self.app.state.compra_service  # Servicio real compartido por la API.
+        headers = self._client_headers()  # Identidad cliente válida del fixture.
+        raw_client = TestClient(self.app, raise_server_exceptions=False)  # Observa el contrato HTTP en vez de la excepción cruda.
+        self.addCleanup(raw_client.close)  # Cierra el cliente auxiliar.
+        with patch.object(  # Simula el lock solo en el listado de pagos.
+            service, "list_payments", side_effect=sqlite3.OperationalError("database is locked")
+        ):
+            response = raw_client.get(  # Invoca la lectura protegida real del historial.
+                "/reservas/00000000-0000-0000-0000-000000000000/pagos",  # Identificador de ruta con formato válido.
+                headers=headers,  # Identidad titular.
+            )  # El patrón aísla el lock sin depender de una reserva existente.
+        self.assertEqual(response.status_code, 503, response.text)  # Esperado según la regla general; hoy la brecha se observa.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Conserva la indicación de reintento.
+        self.assertNotIn("database is locked", response.text)  # No expone el mensaje interno del motor.
+
+
+    def test_reservation_reads_return_500_on_permanent_sql_error(self) -> None:
+        """Un error SQL permanente en las lecturas responde 500 sin filtrar detalles internos."""
+        service = self.app.state.compra_service  # Servicio real compartido por la API.
+        headers = self._client_headers()  # Identidad cliente válida del fixture.
+        raw_client = TestClient(self.app, raise_server_exceptions=False)  # Observa el contrato HTTP sin propagar la excepción.
+        self.addCleanup(raw_client.close)  # Cierra el cliente auxiliar.
+        cases = [  # Cubre las tres lecturas protegidas del flujo de reservas y pagos.
+            ("list_reservations", "/reservas"),  # Listado propio de reservas.
+            ("get_payment", "/reservas/00000000-0000-0000-0000-000000000000/pago"),  # Consulta de pago.
+            ("list_payments", "/reservas/00000000-0000-0000-0000-000000000000/pagos"),  # Historial de pagos.
+        ]
+        for method_name, path in cases:  # Verifica el contrato uniforme en cada ruta.
+            with self.subTest(method=method_name):  # Identifica el caso en el reporte.
+                with patch.object(  # Simula un error SQL que no es lock.
+                    service, method_name, side_effect=sqlite3.OperationalError("near 'BROKEN': syntax error")
+                ):
+                    response = raw_client.get(path, headers=headers)  # Invoca la lectura protegida.
+                self.assertEqual(response.status_code, 500, response.text)  # Un error permanente conserva 500.
+                self.assertNotIn("BROKEN", response.text)  # No expone el detalle interno de SQL.
+                self.assertNotIn("syntax error", response.text)  # Tampoco el mensaje crudo del motor.
 
 
 if __name__ == "__main__":  # Permite ejecutar estos casos directamente con Python.

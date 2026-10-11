@@ -152,6 +152,13 @@ class CompraService:
         if isinstance(total_capacity, bool) or not isinstance(total_capacity, int) or not 0 <= total_capacity <= SQLITE_INTEGER_MAX:  # Permite cero cupos, pero limita el entero a SQLite.
             raise ValueError("La capacidad debe ser un entero no negativo válido para SQLite.")  # Evita inventario inválido o imposible de persistir.
 
+        try:  # Reintenta solo bloqueos transitorios; cada intento abre su propia transacción.
+            return self._with_lock_retry(lambda: self._configure_capacity_once(package_code, travel_date_iso, total_capacity))  # Respeta la política acotada del servicio.
+        except sqlite3.IntegrityError as error:  # Una restricción incumplida es persistencia inválida, no un bloqueo.
+            raise PurchasePersistenceError("La configuración de inventario incumplió una restricción de persistencia.") from error  # Expone un fallo controlado.
+
+    def _configure_capacity_once(self, package_code: int, travel_date_iso: str, total_capacity: int) -> int:
+        """Ejecuta una sola transacción de escritura de capacidad con rollback ante error."""
         with closing(self._connect()) as connection:  # Abre la conexión con claves foráneas habilitadas y asegura su cierre.
             connection.execute("BEGIN IMMEDIATE")  # Toma el bloqueo de escritura antes de comprobar y cambiar la capacidad.
             try:  # Garantiza rollback si el paquete no existe o la capacidad es incompatible.
@@ -228,13 +235,13 @@ class CompraService:
         request_hash = hashlib.sha256(request_material.encode("utf-8")).hexdigest() if normalized_key else None  # Vincula la clave al cuerpo completo, incluido el pasaporte.
 
         if normalized_key is not None:
-            previous = self._read_with_lock_retry(lambda: self._find_reservation_by_key(normalized_rut, normalized_key))  # Evita consultar FX en reintentos ya completados y trata bloqueos como transitorios.
+            previous = self._with_lock_retry(lambda: self._find_reservation_by_key(normalized_rut, normalized_key))  # Evita consultar FX en reintentos ya completados y trata bloqueos como transitorios.
             if previous is not None:
                 if previous[9] != request_hash:
                     raise IdempotencyConflictError("La clave de idempotencia ya se usó con otra solicitud.")
                 return IdempotentPurchaseResult(receipt=self._receipt_from_row(previous), replayed=True)
 
-        exchange_rate = self._read_with_lock_retry(lambda: self._get_package_exchange_rate(package_code))  # Se obtiene antes del BEGIN IMMEDIATE para no mantener el lock de escritura durante una llamada de red; el precio se congela al confirmar.
+        exchange_rate = self._with_lock_retry(lambda: self._get_package_exchange_rate(package_code))  # Se obtiene antes del BEGIN IMMEDIATE para no mantener el lock de escritura durante una llamada de red; el precio se congela al confirmar.
 
         for attempt in range(1, self._max_write_attempts + 1):  # Ejecuta el número de intentos acotado por configuración.
             try:  # Repite la transacción completa solo para bloqueos SQLite transitorios.
@@ -401,18 +408,18 @@ class CompraService:
             raise ValueError("travel_date debe ser una fecha válida.")
         return travel_date.isoformat()
 
-    def _read_with_lock_retry(self, operation: Callable[[], Any]) -> Any:
-        """Ejecuta una lectura preparatoria con la misma política de locks que la escritura."""
+    def _with_lock_retry(self, operation: Callable[[], Any]) -> Any:
+        """Ejecuta una operación SQLite con reintentos acotados solo para bloqueos."""
         for attempt in range(1, self._max_write_attempts + 1):
             try:
                 return operation()
             except sqlite3.OperationalError as error:
                 if not is_database_locked(error):
-                    raise PurchasePersistenceError("SQLite rechazó una lectura preparatoria de la compra.") from error
+                    raise PurchasePersistenceError("SQLite rechazó una operación de persistencia.") from error
                 if attempt == self._max_write_attempts:
-                    raise DatabaseBusyError("La base de datos sigue ocupada; reintente la compra.") from error
+                    raise DatabaseBusyError("La base de datos sigue ocupada; reintente la operación.") from error
                 time.sleep(self._retry_delay_seconds * attempt)
-        raise DatabaseBusyError("No fue posible adquirir la base de datos para leer la compra.")
+        raise DatabaseBusyError("No fue posible adquirir la base de datos para completar la operación.")
 
     def _get_package_exchange_rate(self, package_code: int) -> float | None:
         """Obtiene FX solo para paquetes internacionales y cruceros."""
@@ -550,7 +557,11 @@ class CompraService:
         return None if row is None or row[0] is None else int(row[0])  # Distingue inventario desconocido de una disponibilidad explícita de cero.
 
     def list_reservations(self, rut: str | None = None) -> list[ReservationReceipt]:
-        """Lista todas las reservas para administración o solo las de un RUT."""
+        """Lista reservas tratando un bloqueo de lectura como indisponibilidad transitoria."""
+        return self._with_lock_retry(lambda: self._list_reservations_once(rut))  # Reutiliza la política acotada de locks para lecturas.
+
+    def _list_reservations_once(self, rut: str | None) -> list[ReservationReceipt]:
+        """Ejecuta una sola lectura de reservas para administración o para un RUT."""
         query = """
             SELECT r.reservation_id, r.rut, r.package_code, r.quantity,
                    r.unit_price, r.total_price, r.created_at, r.status,
@@ -689,7 +700,20 @@ class CompraService:
         payment_id: str | None = None,
         is_admin: bool = False,
     ) -> PaymentReceipt:
-        """Devuelve un pago específico o el más reciente al dueño o administrador."""
+        """Devuelve un pago tratando un bloqueo de lectura como indisponibilidad transitoria."""
+        return self._with_lock_retry(  # Reutiliza la política acotada de locks para lecturas.
+            lambda: self._get_payment_once(reservation_id, rut, payment_id=payment_id, is_admin=is_admin)
+        )
+
+    def _get_payment_once(
+        self,
+        reservation_id: str,
+        rut: str,
+        *,
+        payment_id: str | None,
+        is_admin: bool,
+    ) -> PaymentReceipt:
+        """Ejecuta una sola lectura del pago y su comprobación de propiedad."""
         normalized_rut = normalize_rut(rut)  # Normaliza la identidad autenticada antes de comprobar propiedad.
         with closing(self._connect()) as connection:  # Abre una conexión de solo lectura para el estado persistido.
             row = connection.execute(  # Obtiene pago y propietario en una consulta para no filtrar reservas ajenas.
@@ -717,7 +741,17 @@ class CompraService:
         *,
         is_admin: bool = False,
     ) -> list[PaymentReceipt]:
-        """Lista todos los pagos de una reserva al titular o a un administrador."""
+        """Lista los pagos tratando un bloqueo de lectura como indisponibilidad transitoria."""
+        return self._with_lock_retry(lambda: self._list_payments_once(reservation_id, rut, is_admin=is_admin))  # Reutiliza la política acotada de locks para lecturas.
+
+    def _list_payments_once(
+        self,
+        reservation_id: str,
+        rut: str,
+        *,
+        is_admin: bool,
+    ) -> list[PaymentReceipt]:
+        """Ejecuta una sola lectura de pagos y su comprobación de propiedad."""
         normalized_rut = normalize_rut(rut)
         with closing(self._connect()) as connection:
             reservation = connection.execute(
