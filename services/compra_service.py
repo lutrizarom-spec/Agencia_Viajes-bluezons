@@ -541,7 +541,13 @@ class CompraService:
         )  # Retorna el resultado de negocio recién confirmado.
 
     def get_available_capacity(self, package_code: int, travel_date: date | None = None) -> int | None:
-        """Devuelve cupos para una fecha, o el total agregado si no se indica fecha."""
+        """Devuelve cupos tratando un bloqueo de lectura como indisponibilidad transitoria."""
+        return self._with_lock_retry(  # Reutiliza la política acotada de locks para lecturas.
+            lambda: self._get_available_capacity_once(package_code, travel_date)
+        )
+
+    def _get_available_capacity_once(self, package_code: int, travel_date: date | None = None) -> int | None:
+        """Ejecuta una sola lectura de disponibilidad para la fecha solicitada."""
         with closing(self._connect()) as connection:  # Usa una conexión acotada solo para leer el inventario.
             if travel_date is None:
                 row = connection.execute(

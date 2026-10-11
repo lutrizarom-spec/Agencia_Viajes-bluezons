@@ -531,6 +531,8 @@ def create_app(
             price = float(from_minor_units(to_minor_units(price)))
             try:  # Traduce bloqueos de la lectura de inventario a indisponibilidad temporal.
                 available_capacity = compra_service.get_available_capacity(package.codigo, travel_date)  # Filtra por la fecha solicitada cuando viene en query.
+            except (DatabaseBusyError, PurchasePersistenceError) as error:  # El servicio agotó reintentos o falló la persistencia.
+                raise _service_persistence_http_error(error, log_message=f"No se pudo leer la disponibilidad del paquete {package.codigo}.", detail="No se pudo leer la disponibilidad del paquete.") from error
             except sqlite3.Error as error:  # Un lock de inventario pasa a 503; el resto conserva el 500 genérico.
                 raise _package_persistence_http_error(error, log_message=f"No se pudo leer la disponibilidad del paquete {package.codigo}.", detail="No se pudo leer la disponibilidad del paquete.") from error
             response.append(  # Añade los datos públicos, precio y cupos conocidos.
@@ -723,7 +725,12 @@ def create_app(
     ) -> list[ReservationResponse]:
         """Lista reservas de todos los clientes para tareas administrativas."""
         _ = identity  # La dependencia se usa para validar rol, no para limitar la consulta global.
-        receipts = compra_service.list_reservations()  # Omite filtro únicamente después de validar el rol administrador.
+        try:  # Traduce bloqueos de lectura agotados y fallos de persistencia del servicio.
+            receipts = compra_service.list_reservations()  # Omite filtro únicamente después de validar el rol administrador.
+        except (DatabaseBusyError, PurchasePersistenceError) as error:
+            raise _service_persistence_http_error(error, log_message="No se pudieron leer las reservas.", detail="No se pudieron leer las reservas.") from error
+        except sqlite3.Error as error:  # Defensa en profundidad para SQLite crudo que escape del servicio.
+            raise _package_persistence_http_error(error, log_message="No se pudieron leer las reservas.", detail="No se pudieron leer las reservas.") from error
         return [ReservationResponse(**receipt.__dict__) for receipt in receipts]  # Expone cantidad, importe y estado de cada reserva.
 
     @app.post("/reservas/{reservation_id}/cancelar", response_model=ReservationResponse, tags=["Reservas"])  # Cancela la reserva del cliente o una reserva elegida por admin.
