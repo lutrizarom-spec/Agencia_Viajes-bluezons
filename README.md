@@ -14,7 +14,7 @@ Aplicación de consola de una agencia de viajes. `main.py` presenta un menú int
 
 El proyecto mantiene dos capas de reservas con responsabilidades distintas:
 
-- **Dominio/consola:** las clases `Reserva`, `Detalle_Reserva`, `Pago` y `Boleta` (`model/`) y su persistencia `ReservaDao` (`reservas_modelo`, `detalle_reserva`, `servicios`). Las usa el menú `main.py` y las pruebas de modelo. La API no las utiliza.
+- **Dominio/consola:** las clases `Reserva`, `Detalle_Reserva`, `Pago` y `Boleta` (`model/`). La demostración de `main.py` usa `Reserva` y `Pago`, que crean sus `Detalle_Reserva` y su `Boleta`, y las pruebas de modelo también las ejercitan. Su persistencia `ReservaDao` (`reservas_modelo`, `detalle_reserva`, `servicios`) hoy solo la usan las pruebas: `main.py` no la importa ni crea esas tablas. La API no utiliza estas clases.
 - **API operativa:** `CompraService` persiste en `reservas`, `payments` y `package_inventory` con transacciones, idempotencia y control de inventario. Comparte las fórmulas de precio y la regla de pasaporte del dominio, pero no `ReservaDao`.
 
 Ambas capas usan los mismos tres estados de pago; el dominio los expresa en español y la API los persiste y expone en inglés:
