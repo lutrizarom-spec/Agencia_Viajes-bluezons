@@ -951,6 +951,66 @@ class ApiEdgeCaseTests(unittest.TestCase):
         self.assertEqual(purchase_attempt.call_count, 2)  # Respeta el máximo configurado.
         sleep.assert_called_once_with(0)  # Usa la pausa configurada entre el primer y segundo intento.
 
+    def test_idempotent_purchase_translates_lock_in_idempotency_lookup(self) -> None:
+        """Un bloqueo en la pre-consulta de idempotencia es transitorio, no un error crudo."""
+        service = CompraService(self.database_path, max_write_attempts=3, retry_delay_seconds=0.01)  # Política corta y determinista.
+        service.configure_capacity(202, TRAVEL_DATE, 1)  # Deja inventario que no debe descontarse por una lectura bloqueada.
+        with patch.object(  # Simula un lock solo en la lectura preparatoria de idempotencia.
+            service, "_find_reservation_by_key", side_effect=sqlite3.OperationalError("database is locked")
+        ), patch("services.compra_service.time.sleep") as sleep:  # Espía pausas sin hacerlas reales.
+            with self.assertRaises(DatabaseBusyError):  # El lock debe traducirse a indisponibilidad, no escapar como sqlite3 crudo.
+                service.purchase_idempotently("10.000.013-K", 202, 1, "lock-lookup-key", travel_date=TRAVEL_DATE)  # Compra idempotente.
+        self.assertEqual(sleep.call_count, 2)  # Tres intentos de lectura producen dos pausas.
+        self.assertEqual(service.get_available_capacity(202, TRAVEL_DATE), 1)  # La lectura bloqueada no retiene cupos.
+
+    def test_purchase_translates_lock_in_exchange_rate_lookup(self) -> None:
+        """Un bloqueo al leer la tasa de cambio preparatoria es transitorio, no un error crudo."""
+        service = CompraService(self.database_path, max_write_attempts=3, retry_delay_seconds=0.01)  # Política corta y determinista.
+        service.configure_capacity(202, TRAVEL_DATE, 1)  # Deja inventario intacto para comprobar que el lock no lo consume.
+        with patch.object(  # Simula un lock únicamente en la lectura previa del tipo de cambio.
+            service, "_get_package_exchange_rate", side_effect=sqlite3.OperationalError("database is locked")
+        ), patch("services.compra_service.time.sleep") as sleep:  # Espía pausas sin hacerlas reales.
+            with self.assertRaises(DatabaseBusyError):  # Debe traducirse a indisponibilidad temporal.
+                service.purchase_idempotently("10.000.013-K", 202, 1, travel_date=TRAVEL_DATE)  # Compra sin clave también pasa por FX.
+        self.assertEqual(sleep.call_count, 2)  # Respeta la misma política de reintentos que la escritura.
+        self.assertEqual(service.get_available_capacity(202, TRAVEL_DATE), 1)  # El lock previo no descuenta cupos.
+
+    def test_preparatory_read_permanent_sql_error_is_not_a_lock(self) -> None:
+        """Un error SQL no transitorio en las lecturas previas se traduce sin fingir un lock."""
+        service = CompraService(self.database_path, max_write_attempts=3, retry_delay_seconds=0.01)  # Política corta para detectar reintentos indebidos.
+        service.configure_capacity(202, TRAVEL_DATE, 1)  # Prepara el inventario.
+        with patch.object(  # Error permanente en la lectura de idempotencia.
+            service, "_find_reservation_by_key", side_effect=sqlite3.OperationalError("near 'BROKEN': syntax error")
+        ) as lookup, patch("services.compra_service.time.sleep") as sleep:  # Vigila intentos y pausas.
+            with self.assertRaises(PurchasePersistenceError):  # Se espera error de persistencia, no DatabaseBusyError.
+                service.purchase_idempotently("10.000.013-K", 202, 1, "syntax-lookup-key", travel_date=TRAVEL_DATE)  # Compra idempotente.
+        lookup.assert_called_once()  # Un error no transitorio no se reintenta.
+        sleep.assert_not_called()  # No aplica backoff a errores permanentes.
+        with patch.object(  # Error permanente en la lectura del tipo de cambio.
+            service, "_get_package_exchange_rate", side_effect=sqlite3.OperationalError("near 'BROKEN': syntax error")
+        ) as exchange, patch("services.compra_service.time.sleep") as sleep:  # Vigila el segundo camino.
+            with self.assertRaises(PurchasePersistenceError):  # Conserva el manejo controlado de persistencia.
+                service.purchase_idempotently("10.000.013-K", 202, 1, travel_date=TRAVEL_DATE)  # Compra sin clave.
+        exchange.assert_called_once()  # Tampoco reintenta la lectura permanente.
+        sleep.assert_not_called()  # Sin backoff en fallos no transitorios.
+
+    def test_create_reservation_returns_503_on_idempotency_lookup_lock(self) -> None:
+        """Un lock en la lectura preparatoria responde 503 con Retry-After por la API real."""
+        service = self.app.state.compra_service  # Servicio compartido por la API.
+        headers = {**self._client_headers(), "X-Idempotency-Key": "api-lock-key"}  # Usa clave idempotente para activar la pre-consulta.
+        raw_client = TestClient(self.app, raise_server_exceptions=False)  # Permite observar el contrato HTTP en vez de la excepción cruda.
+        self.addCleanup(raw_client.close)  # Cierra el cliente auxiliar.
+        with patch.object(  # Simula el bloqueo solo en la lectura previa de idempotencia.
+            service, "_find_reservation_by_key", side_effect=sqlite3.OperationalError("database is locked")
+        ), patch("services.compra_service.time.sleep"):  # Elimina la espera real del retry.
+            response = raw_client.post(  # Invoca el endpoint real de reservas.
+                "/reservas",  # Ruta protegida que aplica el contrato de errores.
+                json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Cuerpo válido del paquete fixture.
+                headers=headers,  # Identidad y clave idempotente.
+            )  # El lock debe traducirse en la capa de servicio.
+        self.assertEqual(response.status_code, 503, response.text)  # Indisponibilidad temporal, no 500.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Conserva la indicación de reintento documentada.
+
     def test_rate_limiter_translates_locked_operational_error(self) -> None:
         """Un lock de SQLite se traduce a RateLimiterBusyError."""
         limiter = RateLimiter(self.database_path)  # Reutiliza la base temporal ya inicializada.

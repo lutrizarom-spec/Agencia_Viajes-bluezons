@@ -228,13 +228,13 @@ class CompraService:
         request_hash = hashlib.sha256(request_material.encode("utf-8")).hexdigest() if normalized_key else None  # Vincula la clave al cuerpo completo, incluido el pasaporte.
 
         if normalized_key is not None:
-            previous = self._find_reservation_by_key(normalized_rut, normalized_key)  # Evita consultar FX en reintentos ya completados.
+            previous = self._read_with_lock_retry(lambda: self._find_reservation_by_key(normalized_rut, normalized_key))  # Evita consultar FX en reintentos ya completados y trata bloqueos como transitorios.
             if previous is not None:
                 if previous[9] != request_hash:
                     raise IdempotencyConflictError("La clave de idempotencia ya se usó con otra solicitud.")
                 return IdempotentPurchaseResult(receipt=self._receipt_from_row(previous), replayed=True)
 
-        exchange_rate = self._get_package_exchange_rate(package_code)  # Se obtiene antes del BEGIN IMMEDIATE para no mantener el lock de escritura durante una llamada de red; el precio se congela al confirmar.
+        exchange_rate = self._read_with_lock_retry(lambda: self._get_package_exchange_rate(package_code))  # Se obtiene antes del BEGIN IMMEDIATE para no mantener el lock de escritura durante una llamada de red; el precio se congela al confirmar.
 
         for attempt in range(1, self._max_write_attempts + 1):  # Ejecuta el número de intentos acotado por configuración.
             try:  # Repite la transacción completa solo para bloqueos SQLite transitorios.
@@ -400,6 +400,19 @@ class CompraService:
         if isinstance(travel_date, datetime) or not isinstance(travel_date, date):
             raise ValueError("travel_date debe ser una fecha válida.")
         return travel_date.isoformat()
+
+    def _read_with_lock_retry(self, operation: Callable[[], Any]) -> Any:
+        """Ejecuta una lectura preparatoria con la misma política de locks que la escritura."""
+        for attempt in range(1, self._max_write_attempts + 1):
+            try:
+                return operation()
+            except sqlite3.OperationalError as error:
+                if not is_database_locked(error):
+                    raise PurchasePersistenceError("SQLite rechazó una lectura preparatoria de la compra.") from error
+                if attempt == self._max_write_attempts:
+                    raise DatabaseBusyError("La base de datos sigue ocupada; reintente la compra.") from error
+                time.sleep(self._retry_delay_seconds * attempt)
+        raise DatabaseBusyError("No fue posible adquirir la base de datos para leer la compra.")
 
     def _get_package_exchange_rate(self, package_code: int) -> float | None:
         """Obtiene FX solo para paquetes internacionales y cruceros."""
