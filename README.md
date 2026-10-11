@@ -4,7 +4,7 @@ Aplicación de consola de una agencia de viajes. `main.py` presenta un menú int
 
 ## Arquitectura
 
-- **Modelo:** `Paquete_Turistico` contiene los datos comunes y los subtipos especializan su cálculo. `Cliente` hereda los datos comunes de `Persona`. `Reserva` recibe objetos `Cliente` y `Paquete_Turistico` existentes y crea sus `Detalle_Reserva`; `Pago` crea su `Boleta`. El diagrama editable en Mermaid está en `diagrama_agencia_completo.mmd`.
+- **Modelo:** `Paquete_Turistico` contiene los datos comunes y los subtipos especializan su cálculo. `Cliente` hereda los datos comunes de `Persona`. `Reserva` recibe objetos `Cliente` y `Paquete_Turistico` existentes y crea sus `Detalle_Reserva`; `Pago` crea su `Boleta`. Los diagramas editables en Mermaid son `model/diagrama_paquetes.mmd` (modelo núcleo) y `diagrama_agencia_completo.mmd` (ampliado, con los servicios turísticos); ver «Diagramas UML».
 - **Consola:** `main.py` ofrece el menú CRUD de paquetes (opciones 1 a 4) y la opción de demostración del modelo, que imprime los tres precios polimórficos, prueba una validación de setter, presenta una reserva con sus detalles y controla los errores de pasaporte y anticipo.
 - **API REST local:** `main_api.py` expone catálogo público, login JWT, consulta FX y rutas protegidas de reserva e inventario.
 - **Persistencia:** `Dao` comparte la conexión y el cursor; `PaqueteDao` implementa las operaciones de almacenamiento para paquetes.
@@ -24,6 +24,17 @@ Ambas capas usan los mismos tres estados de pago; el dominio los expresa en espa
 | `pendiente` | `pending` |
 | `confirmado` | `confirmed` |
 | `fallido` | `failed` |
+
+### Diagramas UML
+
+- `model/diagrama_paquetes.mmd`: fuente editable del modelo núcleo. De este archivo se genera `diagrama_clases.png`.
+- `diagrama_agencia_completo.mmd`: diagrama ampliado con los servicios turísticos. No genera ninguna imagen del repositorio.
+
+Para regenerar el PNG se necesita Mermaid CLI (`mmdc`, paquete npm `@mermaid-js/mermaid-cli`, que requiere Node.js). Es una herramienta externa: no es una dependencia Python del proyecto ni figura en `requirements.txt` o `requirements-dev.txt`. Desde la raíz del repositorio:
+
+```powershell
+mmdc -i model/diagrama_paquetes.mmd -o diagrama_clases.png -s 2 -b white
+```
 
 ## Características principales
 
