@@ -321,11 +321,13 @@ Las compras sin encabezado conservan el comportamiento anterior y no son
 idempotentes.
 
 El servicio reintenta hasta tres veces por defecto solo si SQLite informa
-`SQLITE_BUSY` o `SQLITE_LOCKED`, con timeout breve y espera incremental. Los
-errores SQL no relacionados con bloqueos no se reintentan; se devuelven como
-fallo de persistencia. Si se agotan los intentos, la API responde `503` y
-`Retry-After: 1`; si el cliente usa clave idempotente, debe conservarla al
-reintentar.
+`SQLITE_BUSY` o `SQLITE_LOCKED`, con timeout breve y espera incremental; esta
+política cubre la compra y los abonos de `POST /reservas` y
+`POST /reservas/{reservation_id}/pagos`. Los errores SQL no relacionados con
+bloqueos no se reintentan; se devuelven como fallo de persistencia: los abonos
+responden `500` con detalle genérico. Si se agotan los intentos, la API responde
+`503` y `Retry-After: 1`; si el cliente usa clave idempotente, debe conservarla
+al reintentar.
 
 Instala las dependencias de ejecución y desarrollo con:
 
