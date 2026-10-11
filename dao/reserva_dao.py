@@ -245,10 +245,12 @@ class ReservaDao(Dao):
         ).fetchall()
         detalles: list[Detalle_Reserva] = []
         for id_detalle, tipo_item, cantidad, id_servicio in detalle_rows:
+            referencia: Paquete_Turistico | Servicio_Turistico
             if tipo_item == "servicio":
-                referencia = self.obtener_servicio(int(id_servicio))
-                if referencia is None:
+                servicio = self.obtener_servicio(int(id_servicio))
+                if servicio is None:
                     continue
+                referencia = servicio
             else:
                 referencia = paquete
             detalles.append(

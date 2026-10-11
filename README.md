@@ -117,6 +117,10 @@ $env:AGENCIA_DB_PATH = "$PWD\agencia.db"
 
 La aplicación falla al crearse si no se configura `AGENCIA_JWT_SECRET`; no
 incluye un secreto predeterminado ni crea usuarios con contraseñas conocidas.
+Si `AGENCIA_DB_PATH` no está configurada se usa `agencia.db` junto al código de
+la aplicación y se registra una advertencia. Para habilitar CORS define
+`AGENCIA_CORS_ORIGINS` con orígenes separados por comas; está deshabilitado por
+defecto.
 El modo factory construye la API y sus servicios SQLite locales. La
 documentación interactiva queda disponible en `http://127.0.0.1:8000/docs`.
 
@@ -345,11 +349,11 @@ Calidad y cobertura (instaladas en `requirements-dev.txt`):
 
 ```powershell
 python -m ruff check .
-python -m mypy          # informativo: aún no bloquea CI
+python -m mypy
 python -m pytest --cov --cov-report=term
 ```
 
-`ruff` y la cobertura bloquean el CI; `mypy` se ejecuta como paso no bloqueante mientras se paga la deuda de tipado.
+`ruff`, `mypy` y la cobertura se ejecutan en el CI y bloquean el pipeline.
 
 ### Copias de seguridad y recuperación local
 

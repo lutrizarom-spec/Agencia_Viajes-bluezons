@@ -256,7 +256,7 @@ def demostracion_modelo() -> None:
     )
     print("\n=== Validación de setter ===")
     try:
-        cliente.telefono_movil = 123
+        cliente.telefono_movil = 123  # type: ignore[assignment]  # Valor inválido deliberado para demostrar la validación del setter.
     except ValueError as error:
         print(f"Error controlado en Cliente.telefono_movil (heredado de Persona): {error}")
 
@@ -277,9 +277,11 @@ def demostracion_modelo() -> None:
     print(f"Paquete agregado: {reserva.paquete.nombre}")
     print("Detalles compuestos:")
     for detalle in reserva.detalles:
+        paquete_detalle = detalle.paquete
+        assert paquete_detalle is not None  # En la demostración cada detalle referencia un paquete.
         print(
             f"  Detalle {detalle.id_detalle}: {detalle.cantidad} x "
-            f"{detalle.paquete.nombre} = "
+            f"{paquete_detalle.nombre} = "
             f"${formatear_monto(detalle.calcular_subtotal())} CLP"
         )
     print(f"Total de la reserva: ${formatear_monto(reserva.calcular_total())} CLP")

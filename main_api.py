@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, closing  # Administra vida de app y 
 from datetime import date  # Valida y transporta la fecha solicitada para el viaje.
 from decimal import Decimal
 from pathlib import Path  # Resuelve rutas de base locales de manera independiente del directorio actual.
-from typing import Annotated, Literal  # Expresa dependencias, validaciones y estados admitidos del flujo de pago.
+from typing import Annotated, Any, Literal  # Expresa dependencias, validaciones y estados admitidos del flujo de pago.
 
 from fastapi import (  # Define rutas, headers HTTP, respuestas y errores.
     Depends,
@@ -21,6 +21,7 @@ from fastapi import (  # Define rutas, headers HTTP, respuestas y errores.
     status,
 )
 from fastapi import Path as PathParameter
+from fastapi.middleware.cors import CORSMiddleware  # CORS opcional configurado por entorno.
 from fastapi.security import (  # Extrae el token Bearer enviado por Authorization.
     HTTPAuthorizationCredentials,
     HTTPBearer,
@@ -244,7 +245,7 @@ class ExchangeRateResponse(BaseModel):
     rate: float  # Valor vigente o último valor conocido si falla el proveedor.
 
 
-def _build_package(row: tuple[object, ...]) -> Paquete_Turistico:
+def _build_package(row: tuple[Any, ...]) -> Paquete_Turistico:
     """Reconstruye un modelo para conservar las fórmulas de precio actuales."""
     return paquete_desde_columnas(*row[:7])  # Fuente única del mapeo tipo→modelo.
 
@@ -264,7 +265,7 @@ def _new_package(codigo: int, payload: PackageFields) -> Paquete_Turistico:
     return Paquete_Turistico(codigo, payload.nombre, payload.duracion, payload.precio_base)  # Acepta el modelo base genérico previamente soportado.
 
 
-def _admin_package_response(row: tuple[object, ...]) -> AdminPackageResponse:
+def _admin_package_response(row: tuple[Any, ...]) -> AdminPackageResponse:
     """Convierte una fila administrativa en respuesta y conserva precio polimórfico."""
     package = _build_package(row[:7])  # Reconstruye el tipo desde las siete columnas históricas.
     tipo = str(row[4])  # Conserva el discriminador guardado para informar al administrador.
@@ -292,11 +293,11 @@ def create_app(
 ) -> FastAPI:
     """Construye e inyecta servicios locales; se usa con Uvicorn en modo factory."""
     logging.basicConfig(level=os.environ.get("AGENCIA_LOG_LEVEL", "INFO").upper())  # Uvicorn solo configura sus loggers; sin esto los INFO de la app no se ven.
-    resolved_database = Path(  # Resuelve la base configurada o la agencia.db junto al código de la aplicación.
-        database_path
-        or os.environ.get("AGENCIA_DB_PATH")
-        or Path(__file__).resolve().with_name("agencia.db")
-    ).resolve()  # Convierte la ruta en absoluta para que no dependa del directorio desde el que se ejecute Uvicorn.
+    configured_database = database_path or os.environ.get("AGENCIA_DB_PATH")  # Respeta la ruta explícita o la variable de entorno.
+    if configured_database is None:  # Sin configuración se cae a la base local junto al código de la aplicación.
+        configured_database = Path(__file__).resolve().with_name("agencia.db")
+        logger.warning("AGENCIA_DB_PATH no está configurada; se usará la base local por defecto %s.", configured_database)  # Hace visible el fallback.
+    resolved_database = Path(configured_database).resolve()  # Convierte la ruta en absoluta para que no dependa del directorio de ejecución.
     resolved_secret = jwt_secret or os.environ.get("AGENCIA_JWT_SECRET")  # Acepta clave de pruebas inyectada o secreto del entorno local.
     if not resolved_secret:  # Impide emitir JWT con una clave fija o insegura por defecto.
         raise RuntimeError("Define AGENCIA_JWT_SECRET antes de crear la API.")  # Falla rápido y explica la configuración requerida.
@@ -387,6 +388,19 @@ def create_app(
                     pass
 
     app = FastAPI(title="Agencia de Viajes API", version="1.0.0", lifespan=app_lifespan)  # Configura limpieza de pagos en startup y shutdown.
+    cors_origins = [  # CORS opt-in: se activa solo si el entorno declara orígenes.
+        origin.strip()
+        for origin in os.environ.get("AGENCIA_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    if cors_origins:  # Deshabilitado por defecto para el uso local.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     app.state.auth_service = auth_service  # Conserva los servicios compartidos en el estado de esta aplicación.
     app.state.rate_limiter = rate_limiter  # Evita crear una instancia distinta por cada solicitud.
     app.state.compra_service = compra_service  # Comparte la compra atómica entre solicitudes.

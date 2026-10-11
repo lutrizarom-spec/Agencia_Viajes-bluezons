@@ -16,7 +16,5 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - run: python -m ruff check .
+      - run: python -m mypy
       - run: python -m pytest --cov --cov-report=term
-      - name: mypy (no bloqueante)
-        continue-on-error: true
-        run: python -m mypy

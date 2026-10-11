@@ -6,6 +6,8 @@ Fuente única del mapeo tipo→modelo que antes estaba duplicado en `main_api.py
 
 from __future__ import annotations
 
+from typing import cast
+
 from model.paquete_crucero import Paquete_Crucero
 from model.paquete_internacional import Paquete_Internacional
 from model.paquete_nacional import Paquete_Nacional
@@ -27,7 +29,9 @@ def paquete_desde_columnas(
             codigo, nombre, duracion, precio_base, bool(pasaporte)
         )
     if tipo == "crucero":
-        return Paquete_Crucero(codigo, nombre, duracion, precio_base, impuesto)
+        return Paquete_Crucero(
+            codigo, nombre, duracion, precio_base, cast(float, impuesto)
+        )
     if tipo == "nacional":
         return Paquete_Nacional(codigo, nombre, duracion, precio_base)
     return Paquete_Turistico(codigo, nombre, duracion, precio_base)

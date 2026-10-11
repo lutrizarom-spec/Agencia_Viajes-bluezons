@@ -13,6 +13,7 @@ from dataclasses import dataclass  # Define el resultado de compra como un valor
 from datetime import UTC, date, datetime, timedelta  # Registra fecha de viaje y timestamps de pagos en UTC.
 from decimal import Decimal
 from pathlib import Path  # Acepta rutas locales de base de datos.
+from typing import Any  # Anota las filas crudas de SQLite, que no exponen tipos estáticos.
 
 from model.cliente import pasaporte_registrado  # Reutiliza la regla de pasaporte del dominio.
 from model.money import MAX_MINOR_UNITS, from_minor_units, half_up_minor_units, to_minor_units
@@ -146,7 +147,7 @@ class CompraService:
         """Define cupos de un paquete para una fecha sin rebajar reservas existentes."""
         if isinstance(package_code, bool) or not isinstance(package_code, int) or not 1 <= package_code <= SQLITE_INTEGER_MAX:  # Rechaza códigos fuera del rango numérico de SQLite.
             raise ValueError("El código de paquete debe ser un entero positivo válido para SQLite.")  # Explica qué identificador se espera.
-        travel_date = self._normalize_travel_date(travel_date)  # Normaliza la fecha ISO antes de usarla como clave de inventario.
+        travel_date_iso = self._normalize_travel_date(travel_date)  # Normaliza la fecha ISO antes de usarla como clave de inventario.
         if isinstance(total_capacity, bool) or not isinstance(total_capacity, int) or not 0 <= total_capacity <= SQLITE_INTEGER_MAX:  # Permite cero cupos, pero limita el entero a SQLite.
             raise ValueError("La capacidad debe ser un entero no negativo válido para SQLite.")  # Evita inventario inválido o imposible de persistir.
 
@@ -167,7 +168,7 @@ class CompraService:
                         total_capacity = excluded.total_capacity
                     WHERE excluded.total_capacity >= package_inventory.reserved_capacity
                     """,
-                    (package_code, travel_date, total_capacity),  # Parametriza paquete, fecha y capacidad.
+                    (package_code, travel_date_iso, total_capacity),  # Parametriza paquete, fecha y capacidad.
                 )  # El WHERE impide rebajar la capacidad por debajo de las ventas existentes.
                 updated = connection.execute("SELECT changes()").fetchone()[0]  # Lee el conteo que SQLite devuelve para la última escritura.
                 if updated == 0:  # Distingue el conflicto de capacidad del caso de inserción/actualización exitosa.
@@ -175,7 +176,7 @@ class CompraService:
 
                 available = connection.execute(  # Calcula los cupos disponibles posteriores a la configuración.
                     "SELECT total_capacity - reserved_capacity FROM package_inventory WHERE package_code = ? AND travel_date = ?",  # Lee el inventario exacto que se configuró.
-                    (package_code, travel_date),  # Limita la consulta al paquete y fecha solicitados.
+                    (package_code, travel_date_iso),  # Limita la consulta al paquete y fecha solicitados.
                 ).fetchone()[0]  # Obtiene el entero de cupos que puede venderse.
                 connection.commit()  # Confirma la nueva capacidad tras completar sus validaciones.
                 return int(available)  # Devuelve al administrador el inventario vendible actual.
@@ -421,7 +422,7 @@ class CompraService:
         self,
         normalized_rut: str,
         idempotency_key: str,
-    ) -> tuple[object, ...] | None:
+    ) -> tuple[Any, ...] | None:
         """Lee el recibo anterior para repetir una compra sin volver a consultar FX."""
         query = """
             SELECT r.reservation_id, r.rut, r.package_code, r.quantity,
@@ -476,7 +477,7 @@ class CompraService:
         return "database is locked" in message or "database table is locked" in message  # Usa mensajes exactos conocidos como fallback limitado.
 
     @staticmethod
-    def _receipt_from_row(row: tuple[object, ...]) -> ReservationReceipt:
+    def _receipt_from_row(row: tuple[Any, ...]) -> ReservationReceipt:
         """Reconstruye un recibo persistido desde las columnas de reserva."""
         return ReservationReceipt(  # Normaliza los valores SQLite al contrato inmutable del servicio.
             reservation_id=str(row[0]),  # Recupera la clave única de la reserva.
@@ -1048,7 +1049,7 @@ class CompraService:
                 raise  # Permite que el wrapper reintente solo bloqueos BUSY/LOCKED.
 
     @staticmethod
-    def _payment_from_row(row: tuple[object, ...]) -> PaymentReceipt:
+    def _payment_from_row(row: tuple[Any, ...]) -> PaymentReceipt:
         """Convierte las columnas de SQLite al contrato inmutable de pago."""
         return PaymentReceipt(  # Normaliza tipos SQLite para el servicio y la API.
             payment_id=str(row[0]),  # Entrega el identificador local del pago.
@@ -1060,7 +1061,7 @@ class CompraService:
             expires_at=None if row[6] is None or str(row[3]) != "pending" else str(row[6]),  # Solo informa deadline mientras el pago siga pendiente.
         )  # Retorna el recibo local de pago.
 
-    def _build_package(self, row: tuple[object, ...]) -> Paquete_Turistico:
+    def _build_package(self, row: tuple[Any, ...]) -> Paquete_Turistico:
         """Reconstruye el subtipo de paquete usando las columnas almacenadas."""
         return paquete_desde_columnas(row[0], row[1], row[2], row[3], row[4], row[5], row[6])  # Ignora las columnas de inventario unidas.
 
