@@ -116,19 +116,22 @@ class FxService:
 
             self._failure_count = 0  # Un resultado válido rompe la secuencia de fallos consecutivos.
             self._open_until = 0.0  # Cierra el circuito después de una consulta o probe exitosa.
-            with closing(sqlite3.connect(self._database_path, timeout=5)) as connection:  # Abre una conexión corta y con espera acotada.
-                with connection:  # Usa el context manager para confirmar cambios o revertirlos si ocurre un error.
-                    connection.execute(
-                        """
-                        INSERT INTO fx_cache (base_currency, target_currency, rate)
-                        VALUES ('USD', 'CLP', ?)
-                        ON CONFLICT (base_currency, target_currency)
-                        DO UPDATE SET rate = excluded.rate,
-                                      updated_at = CURRENT_TIMESTAMP
-                        """,
-                        (rate,),  # Parametriza la tasa en vez de concatenar datos dentro de SQL.
-                    )  # Inserta la primera cotización o actualiza la existente para USD/CLP.
-            return rate  # Retorna la respuesta nueva después de persistirla como último valor válido.
+            try:
+                with closing(sqlite3.connect(self._database_path, timeout=5)) as connection:  # Abre una conexión corta y con espera acotada.
+                    with connection:  # Usa el context manager para confirmar cambios o revertirlos si ocurre un error.
+                        connection.execute(
+                            """
+                            INSERT INTO fx_cache (base_currency, target_currency, rate)
+                            VALUES ('USD', 'CLP', ?)
+                            ON CONFLICT (base_currency, target_currency)
+                            DO UPDATE SET rate = excluded.rate,
+                                          updated_at = CURRENT_TIMESTAMP
+                            """,
+                            (rate,),  # Parametriza la tasa en vez de concatenar datos dentro de SQL.
+                        )  # Inserta la primera cotización o actualiza la existente para USD/CLP.
+            except sqlite3.Error:
+                pass  # Si la caché no se puede escribir, la tasa válida igual se devuelve al consumidor.
+            return rate  # Retorna la respuesta nueva después de intentar persistirla como último valor válido.
 
     def _ensure_schema(self) -> None:
         """Prepara la tabla de caché sin borrar datos previamente almacenados."""

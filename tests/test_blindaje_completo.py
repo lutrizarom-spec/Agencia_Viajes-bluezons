@@ -45,6 +45,16 @@ class FxServiceTests(unittest.TestCase):
             fallback_service = FxService(database_path, provider=failed_provider)  # Reutiliza la base que contiene la tasa previamente persistida.
             self.assertEqual(fallback_service.get_usd_clp_rate(), 950.5)  # Verifica que el servicio responda con caché y no propague el error externo.
 
+    def test_successful_rate_is_returned_even_if_cache_write_fails(self) -> None:
+        """Una tasa válida debe devolverse aunque falle la escritura de la caché."""
+        with tempfile.TemporaryDirectory() as directory:
+            service = FxService(Path(directory) / "agency.db", provider=lambda: 950.5)  # Proveedor determinista sin red.
+            with patch(  # Simula que la base está bloqueada justo al persistir la nueva tasa.
+                "services.fx_service.sqlite3.connect",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ):  # Toda apertura de conexión fallará mientras dure el contexto.
+                self.assertEqual(service.get_usd_clp_rate(), 950.5)  # La respuesta nueva no debe perderse por la caché.
+
     def test_provider_failure_without_cache_raises_domain_error(self) -> None:
         """Sin proveedor disponible ni valor previo, se informa un fallo controlado."""
         with tempfile.TemporaryDirectory() as directory:
