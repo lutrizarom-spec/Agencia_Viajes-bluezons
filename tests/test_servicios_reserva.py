@@ -160,6 +160,119 @@ class ReservaPersistenciaTests(unittest.TestCase):
         self.assertEqual(filas, 5)
         self.assertEqual(len(self.dao.obtener_servicios_de_reserva("RES-701")), 4)
 
+    def _cursor_que_falla_en_insert(self, numero_insert: int) -> sqlite3.Cursor:
+        original = self.dao.cursor
+
+        class _CursorQueFalla:
+            def __init__(self, cursor: sqlite3.Cursor) -> None:
+                self._cursor = cursor
+                self._inserts = 0
+
+            def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+                if sql.lstrip().startswith("INSERT INTO detalle_reserva"):
+                    self._inserts += 1
+                    if self._inserts == numero_insert:
+                        raise sqlite3.OperationalError("database is locked (simulado)")
+                return self._cursor.execute(sql, *args)  # type: ignore[arg-type]
+
+            def __getattr__(self, nombre: str) -> object:
+                return getattr(self._cursor, nombre)
+
+        self.dao.cursor = _CursorQueFalla(original)
+        self.addCleanup(setattr, self.dao, "cursor", original)
+        return original
+
+    def test_fallo_al_guardar_deja_la_base_intacta(self) -> None:
+        original = self._cursor_que_falla_en_insert(3)
+
+        with self.assertRaises(sqlite3.OperationalError):
+            self.dao.guardar_reserva(_reserva_con_servicios())
+
+        self.dao.cursor = original
+        self.dao.guardar_servicio(
+            Hotel_Estancia(9, "Otro Hotel", "Lima", "Centro", 10000.0, 1)
+        )
+
+        with closing(crear_conexion(self.db_path)) as otra_conexion:
+            dao_nuevo = ReservaDao(otra_conexion)
+            cabeceras = dao_nuevo.cursor.execute(
+                "SELECT COUNT(*) FROM reservas_modelo WHERE numero_reserva = ?",
+                ("RES-701",),
+            ).fetchone()[0]
+            detalles = dao_nuevo.cursor.execute(
+                "SELECT COUNT(*) FROM detalle_reserva WHERE numero_reserva = ?",
+                ("RES-701",),
+            ).fetchone()[0]
+            servicios = dao_nuevo.cursor.execute(
+                "SELECT COUNT(*) FROM servicios"
+            ).fetchone()[0]
+            self.assertEqual(cabeceras, 0)
+            self.assertEqual(detalles, 0)
+            self.assertEqual(servicios, 1)
+            self.assertIsNone(dao_nuevo.obtener_reserva("RES-701"))
+
+    def test_reintento_tras_fallo_consolida_la_reserva_completa(self) -> None:
+        original = self._cursor_que_falla_en_insert(3)
+
+        with self.assertRaises(sqlite3.OperationalError):
+            self.dao.guardar_reserva(_reserva_con_servicios())
+
+        self.dao.cursor = original
+        self.dao.guardar_reserva(_reserva_con_servicios())
+
+        with closing(crear_conexion(self.db_path)) as otra_conexion:
+            recuperada = ReservaDao(otra_conexion).obtener_reserva("RES-701")
+
+        self.assertIsNotNone(recuperada)
+        self.assertEqual(recuperada.numero_reserva, "RES-701")
+        self.assertEqual(len(recuperada.detalles), 5)
+        self.assertEqual(len(recuperada.servicios), 4)
+
+    def test_estado_confirmado_se_conserva_tras_recuperar(self) -> None:
+        reserva = _reserva_con_servicios()
+        reserva.confirmar()
+        self.dao.guardar_reserva(reserva)
+
+        with closing(crear_conexion(self.db_path)) as otra_conexion:
+            recuperada = ReservaDao(otra_conexion).obtener_reserva("RES-701")
+
+        self.assertIsNotNone(recuperada)
+        self.assertEqual(recuperada.estado, "confirmada")
+        self.assertEqual(len(recuperada.detalles), 5)
+        self.assertEqual(recuperada.total, reserva.total)
+
+    def test_estado_cancelado_se_conserva_tras_recuperar(self) -> None:
+        reserva = _reserva_con_servicios()
+        reserva.confirmar()
+        reserva.cancelar()
+        self.dao.guardar_reserva(reserva)
+
+        with closing(crear_conexion(self.db_path)) as otra_conexion:
+            recuperada = ReservaDao(otra_conexion).obtener_reserva("RES-701")
+
+        self.assertIsNotNone(recuperada)
+        self.assertEqual(recuperada.estado, "cancelada")
+        self.assertEqual(len(recuperada.detalles), 5)
+
+    def test_reserva_sin_detalles_se_conserva(self) -> None:
+        paquete = Paquete_Nacional(702, "Solo cabecera", 2, 10000.0)
+        reserva = Reserva(
+            "RES-702",
+            date(2026, 10, 6),
+            date(2026, 12, 15),
+            _cliente_con_pasaporte(),
+            paquete,
+        )
+        self.dao.guardar_reserva(reserva)
+
+        with closing(crear_conexion(self.db_path)) as otra_conexion:
+            recuperada = ReservaDao(otra_conexion).obtener_reserva("RES-702")
+
+        self.assertIsNotNone(recuperada)
+        self.assertEqual(recuperada.numero_reserva, "RES-702")
+        self.assertEqual(recuperada.estado, "pendiente")
+        self.assertEqual(len(recuperada.detalles), 0)
+
     def test_reserva_inexistente_retorna_none(self) -> None:
         self.assertIsNone(self.dao.obtener_reserva("NO-EXISTE"))
 

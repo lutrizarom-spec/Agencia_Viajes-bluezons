@@ -104,42 +104,47 @@ class ReservaDao(Dao):
 
     def guardar_reserva(self, reserva: Reserva) -> None:
         """Persiste la cabecera, los servicios y todas las líneas de la reserva."""
-        self._upsert_reserva(reserva)
-        self.cursor.execute(
-            "DELETE FROM detalle_reserva WHERE numero_reserva = ?",
-            (reserva.numero_reserva,),
-        )
-        for orden, detalle in enumerate(reserva.detalles, start=1):
-            referencia = detalle.referencia
-            if isinstance(referencia, Servicio_Turistico):
-                self._upsert_servicio(referencia)
-                tipo_item = "servicio"
-                paquete_codigo = None
-                id_servicio = referencia.id_servicio
-            else:
-                tipo_item = "paquete"
-                paquete_codigo = referencia.codigo
-                id_servicio = None
+        self.conexion.execute("BEGIN IMMEDIATE")
+        try:
+            self._upsert_reserva(reserva)
             self.cursor.execute(
-                """
-                INSERT INTO detalle_reserva (
-                    id_detalle, numero_reserva, orden, tipo_item,
-                    cantidad, subtotal, paquete_codigo, id_servicio
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    detalle.id_detalle,
-                    reserva.numero_reserva,
-                    orden,
-                    tipo_item,
-                    detalle.cantidad,
-                    detalle.subtotal,
-                    paquete_codigo,
-                    id_servicio,
-                ),
+                "DELETE FROM detalle_reserva WHERE numero_reserva = ?",
+                (reserva.numero_reserva,),
             )
-        self.conexion.commit()
+            for orden, detalle in enumerate(reserva.detalles, start=1):
+                referencia = detalle.referencia
+                if isinstance(referencia, Servicio_Turistico):
+                    self._upsert_servicio(referencia)
+                    tipo_item = "servicio"
+                    paquete_codigo = None
+                    id_servicio = referencia.id_servicio
+                else:
+                    tipo_item = "paquete"
+                    paquete_codigo = referencia.codigo
+                    id_servicio = None
+                self.cursor.execute(
+                    """
+                    INSERT INTO detalle_reserva (
+                        id_detalle, numero_reserva, orden, tipo_item,
+                        cantidad, subtotal, paquete_codigo, id_servicio
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        detalle.id_detalle,
+                        reserva.numero_reserva,
+                        orden,
+                        tipo_item,
+                        detalle.cantidad,
+                        detalle.subtotal,
+                        paquete_codigo,
+                        id_servicio,
+                    ),
+                )
+            self.conexion.commit()
+        except Exception:
+            self.conexion.rollback()
+            raise
 
     def obtener_servicio(self, id_servicio: int) -> Servicio_Turistico | None:
         """Recupera un servicio concreto reconstruyendo su subtipo."""
