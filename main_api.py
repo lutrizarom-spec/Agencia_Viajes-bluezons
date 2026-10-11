@@ -78,7 +78,11 @@ from services.notification_outbox import (
     OutboxWorker,
     SmtpMailer,
 )
-from services.rate_limiter import RateLimiter  # Aplica límites locales persistidos a las rutas sensibles.
+from services.rate_limiter import (  # Aplica límites locales y traduce fallos de SQLite a errores de dominio.
+    RateLimiter,
+    RateLimiterBusyError,
+    RateLimiterPersistenceError,
+)
 
 PAYMENT_EXPIRY_SWEEP_SECONDS = 30  # Limita a treinta segundos la demora adicional para liberar un pago vencido.
 NOTIFICATION_OUTBOX_POLL_SECONDS = 2
@@ -284,6 +288,26 @@ def _admin_package_response(row: tuple[Any, ...]) -> AdminPackageResponse:
     )  # Retorna un objeto JSON consistente para las rutas administrativas.
 
 
+def _is_database_locked(error: sqlite3.OperationalError) -> bool:
+    """Reconoce solo errores SQLite BUSY/LOCKED, nunca sintaxis u otros fallos."""
+    error_code = getattr(error, "sqlite_errorcode", None)  # Obtiene el código extendido disponible en las versiones actuales de sqlite3.
+    if error_code is not None:  # Prefiere el código estable cuando Python lo proporciona.
+        primary_code = error_code & 0xFF  # SQLite guarda el código primario en los ocho bits inferiores.
+        return primary_code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)  # Solo bloqueos se consideran transitorios.
+    message = str(error).casefold()  # Compatibilidad con runtimes antiguos que no exponen sqlite_errorcode.
+    return "database is locked" in message or "database table is locked" in message  # Usa mensajes exactos conocidos como fallback limitado.
+
+
+def _package_persistence_http_error(
+    error: sqlite3.Error, *, log_message: str, detail: str
+) -> HTTPException:
+    """Traduce un fallo SQLite de paquetes: bloqueo transitorio a 503, resto a 500."""
+    if isinstance(error, sqlite3.OperationalError) and _is_database_locked(error):  # Un bloqueo admite reintento inmediato con la misma solicitud.
+        return HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="La base de datos está ocupada; reintente más tarde.", headers={"Retry-After": "1"})  # No expone SQL ni reintenta internamente.
+    logger.exception(log_message)  # Registra el diagnóstico del fallo no transitorio.
+    return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail)  # Conserva el 500 y su detalle actual.
+
+
 def create_app(
     database_path: str | Path | None = None,
     *,
@@ -410,6 +434,20 @@ def create_app(
     app.state.database_path = resolved_database  # Permite a rutas y pruebas inspeccionar la ubicación activa.
     bearer_scheme = HTTPBearer(auto_error=False)  # Deja que la dependencia convierta credenciales ausentes a un 401 uniforme.
 
+    def check_rate_limit(  # Centraliza el límite y su manejo de errores para no duplicarlo en cada ruta.
+        identifier: str, *, limit: int, window_seconds: float, scope: str
+    ) -> bool:
+        """Aplica el límite y traduce fallos de SQLite a respuestas HTTP seguras."""
+        try:  # El limitador falla cerrado: sin veredicto no se permite la petición.
+            return rate_limiter.allow_request(
+                identifier, limit=limit, window_seconds=window_seconds, scope=scope
+            )
+        except RateLimiterBusyError as error:  # Un bloqueo transitorio habilita un reintento inmediato.
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="El limitador de solicitudes no está disponible temporalmente.", headers={"Retry-After": "1"}) from error
+        except RateLimiterPersistenceError as error:  # Un fallo no transitorio no expone SQL ni permite la petición.
+            logger.exception("No se pudo persistir el conteo del limitador de solicitudes.")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo verificar el límite de solicitudes.") from error
+
     def current_user(  # Define la dependencia que autentica una solicitud protegida.
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],  # Extrae token Bearer si el encabezado existe.
     ) -> UserIdentity:
@@ -460,7 +498,7 @@ def create_app(
             rate_key = normalize_rut(payload.rut)  # Agrupa con puntos, sin puntos y mayúsculas bajo el mismo RUT válido.
         except ValueError:  # Aun los RUT mal formados deben consumir límite para dificultar fuerza bruta.
             rate_key = payload.rut.strip().casefold() or "rut-vacio"  # Conserva clave acotada por el límite de longitud de Pydantic.
-        if not rate_limiter.allow_request(rate_key, limit=5, window_seconds=60, scope="auth:login"):  # Permite cinco intentos por RUT cada minuto.
+        if not check_rate_limit(rate_key, limit=5, window_seconds=60, scope="auth:login"):  # Permite cinco intentos por RUT cada minuto.
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Demasiados intentos de autenticación; reintente más tarde.")  # Devuelve respuesta estándar para throttling.
         try:  # Ejecuta bcrypt y firma un token solo ante credenciales válidas.
             token, identity = auth_service.authenticate(payload.rut, payload.password)  # Verifica credenciales con error genérico ante fallo.
@@ -471,8 +509,11 @@ def create_app(
     @app.get("/paquetes", response_model=list[PackageResponse], tags=["Catálogo"])  # Publica una consulta sin autenticación al catálogo local.
     def list_packages(travel_date: date | None = None) -> list[PackageResponse]:
         """Lee catálogo; acepta travel_date como query opcional para consultar disponibilidad exacta."""
-        with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre una lectura acotada de catálogo.
-            rows = PaqueteDao(connection).obtener_paquetes()  # Reutiliza la consulta de paquetes implementada en el DAO.
+        try:  # Traduce bloqueos de SQLite a indisponibilidad temporal durante la lectura pública.
+            with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre una lectura acotada de catálogo.
+                rows = PaqueteDao(connection).obtener_paquetes()  # Reutiliza la consulta de paquetes implementada en el DAO.
+        except sqlite3.Error as error:  # Un lock pasa a 503; cualquier otro fallo conserva el 500 genérico.
+            raise _package_persistence_http_error(error, log_message="No se pudo leer el catálogo de paquetes.", detail="No se pudo leer el catálogo de paquetes.") from error
         response: list[PackageResponse] = []  # Prepara una lista tipada para serialización JSON y OpenAPI.
         exchange_rate: float | None = None
         for row in rows:  # Convierte cada fila SQLite en un modelo y una respuesta pública.
@@ -506,8 +547,11 @@ def create_app(
     ) -> list[AdminPackageResponse]:
         """Lista todos los paquetes para que administración distinga los inactivos."""
         _ = identity  # La identidad se utiliza para autorizar, no como filtro del catálogo.
-        with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre y cierra una conexión solo para lectura.
-            rows = PaqueteDao(connection).obtener_paquetes_admin()  # Incluye filas activas e inactivas con su bandera.
+        try:  # Traduce bloqueos de SQLite a indisponibilidad temporal durante la lectura administrativa.
+            with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre y cierra una conexión solo para lectura.
+                rows = PaqueteDao(connection).obtener_paquetes_admin()  # Incluye filas activas e inactivas con su bandera.
+        except sqlite3.Error as error:  # Un lock pasa a 503; cualquier otro fallo conserva el 500 genérico.
+            raise _package_persistence_http_error(error, log_message="No se pudo leer el catálogo administrativo de paquetes.", detail="No se pudo leer el catálogo de paquetes.") from error
         return [_admin_package_response(row) for row in rows]  # Reutiliza el modelo de dominio y su fórmula de precio.
 
     @app.post("/admin/paquetes", response_model=AdminPackageResponse, status_code=status.HTTP_201_CREATED, tags=["Administración"])  # Registra paquetes solo con rol administrador.
@@ -521,16 +565,19 @@ def create_app(
             package = _new_package(payload.codigo, payload)  # Construye el modelo de dominio antes de persistir.
         except ValueError as error:  # Convierte valores no válidos del dominio a un error de entrada claro.
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error  # No presenta un dato inválido como fallo interno.
-        try:  # Traduce errores esperables de persistencia al contrato HTTP.
+        try:  # Traduce errores esperables de la escritura al contrato HTTP.
             with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Aísla la escritura en una conexión corta.
-                dao = PaqueteDao(connection)  # Reutiliza las operaciones de catálogo existentes.
-                dao.insertar_paquete(package)  # Inserta el paquete publicado con código único.
-                row = dao.obtener_paquete(payload.codigo, incluir_inactivo=True)  # Recupera la representación persistida para responder.
+                PaqueteDao(connection).insertar_paquete(package)  # Inserta el paquete publicado; el DAO confirma antes de salir.
         except sqlite3.IntegrityError as error:  # Un código duplicado viola la clave primaria y no debe reintentarse.
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya existe un paquete con ese código.") from error  # Reporta el conflicto de forma estable.
         except sqlite3.Error as error:  # Expone el fallo técnico como error del servidor sin filtrar SQL.
-            logger.exception("No se pudo crear el paquete %s.", payload.codigo)  # Registra diagnóstico para el operador.
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo persistir el paquete.") from error  # No disfraza una falla de persistencia.
+            raise _package_persistence_http_error(error, log_message=f"No se pudo crear el paquete {payload.codigo}.", detail="No se pudo persistir el paquete.") from error  # No disfraza una falla de persistencia.
+        try:  # La escritura ya se confirmó: la relectura no debe traducir bloqueos a 503.
+            with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre una lectura posterior al commit.
+                row = PaqueteDao(connection).obtener_paquete(payload.codigo, incluir_inactivo=True)  # Recupera la representación persistida para responder.
+        except sqlite3.Error as error:  # Un fallo de relectura responde 500, no 503, porque la escritura es irreversible.
+            logger.exception("No se pudo leer el paquete recién creado %s.", payload.codigo)  # Registra el diagnóstico de la anomalía.
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="El paquete se creó, pero no pudo recuperarse.") from error  # Informa una anomalía observable.
         if row is None:  # Protege la consistencia si la lectura posterior inesperadamente no encuentra la inserción.
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="El paquete se creó, pero no pudo recuperarse.")  # Informa una anomalía observable.
         return _admin_package_response(row)  # Devuelve datos normalizados desde la base.
@@ -547,13 +594,18 @@ def create_app(
             package = _new_package(package_code, payload)  # Construye el tipo de dominio correspondiente al cuerpo.
         except ValueError as error:  # Evita devolver un 500 ante una combinación semánticamente inválida.
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error  # Expone validación como HTTP 422.
-        try:  # Captura únicamente fallos propios de la persistencia SQLite.
-            with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre una conexión corta para la edición y lectura.
-                dao = PaqueteDao(connection)  # Usa el DAO de paquetes para mantener SQL centralizado.
-                updated = dao.actualizar_paquete(package, package_code)  # Actualiza solo filas que sigan activas.
-                row = dao.obtener_paquete(package_code) if updated else None  # Recupera la fila solo si la edición se aplicó.
+        try:  # Captura únicamente fallos propios de la escritura SQLite.
+            with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre una conexión corta solo para la edición.
+                updated = PaqueteDao(connection).actualizar_paquete(package, package_code)  # Actualiza solo filas que sigan activas; el DAO confirma antes de salir.
         except sqlite3.Error as error:  # No trata fallos de base de datos como un recurso inexistente.
-            logger.exception("No se pudo actualizar el paquete %s.", package_code)  # Mantiene información de diagnóstico en el log.
+            raise _package_persistence_http_error(error, log_message=f"No se pudo actualizar el paquete {package_code}.", detail="No se pudo actualizar el paquete.") from error  # Devuelve 503 para lock y 500 para el resto.
+        if not updated:  # El código inexistente o la baja lógica se consideran recurso no editable.
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No existe un paquete activo con ese código.")  # Evita reactivar accidentalmente una baja.
+        try:  # La edición ya se confirmó: la relectura no debe traducir bloqueos a 503.
+            with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre una lectura posterior al commit.
+                row = PaqueteDao(connection).obtener_paquete(package_code)  # Recupera la versión persistida de un paquete activo.
+        except sqlite3.Error as error:  # Un fallo de relectura responde 500, no 503, porque la edición ya se confirmó.
+            logger.exception("No se pudo leer el paquete actualizado %s.", package_code)  # Registra el diagnóstico de la anomalía.
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo actualizar el paquete.") from error  # Devuelve fallo explícito.
         if row is None:  # El código inexistente o la baja lógica se consideran recurso no editable.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No existe un paquete activo con ese código.")  # Evita reactivar accidentalmente una baja.
@@ -566,18 +618,25 @@ def create_app(
     ) -> AdminPackageResponse:
         """Desactiva el paquete de forma idempotente sin borrar reservas ni pagos."""
         _ = identity  # La dependencia valida que solo administración gestione disponibilidad.
-        try:  # Recupera y desactiva el registro dentro de operaciones DAO parametrizadas.
-            with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre una conexión de trabajo local.
-                dao = PaqueteDao(connection)  # Centraliza el acceso a paquetes.
-                row = dao.obtener_paquete(package_code, incluir_inactivo=True)  # Distingue la inexistencia de una baja ya realizada.
-                if row is None:  # Solo el código realmente inexistente produce 404.
-                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No existe un paquete con ese código.")  # Mantiene un error de recurso explícito.
-                if bool(row[7]):  # Cambia el estado solo en la primera petición de baja.
-                    dao.eliminar_paquete(package_code)  # Actualiza activo=0 en vez de ejecutar DELETE.
-                    row = dao.obtener_paquete(package_code, incluir_inactivo=True)  # Lee el estado final para responder.
-        except sqlite3.Error as error:  # Distingue errores SQLite de respuestas HTTP intencionales.
-            logger.exception("No se pudo desactivar el paquete %s.", package_code)  # Permite diagnosticar fallos de almacenamiento.
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo desactivar el paquete.") from error  # No oculta la falla.
+        try:  # La lectura previa distingue inexistencia de una baja ya realizada.
+            with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre una conexión de lectura local.
+                row = PaqueteDao(connection).obtener_paquete(package_code, incluir_inactivo=True)  # Recupera el estado actual del paquete.
+        except sqlite3.Error as error:  # Un lock previo es transitorio; el resto conserva el 500.
+            raise _package_persistence_http_error(error, log_message=f"No se pudo desactivar el paquete {package_code}.", detail="No se pudo desactivar el paquete.") from error
+        if row is None:  # Solo el código realmente inexistente produce 404.
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No existe un paquete con ese código.")  # Mantiene un error de recurso explícito.
+        if bool(row[7]):  # Cambia el estado solo en la primera petición de baja.
+            try:  # La baja escribe y confirma; su lock sí es transitorio.
+                with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre una conexión de escritura local.
+                    PaqueteDao(connection).eliminar_paquete(package_code)  # Actualiza activo=0 en vez de ejecutar DELETE.
+            except sqlite3.Error as error:  # Un lock de escritura responde 503; el resto, 500.
+                raise _package_persistence_http_error(error, log_message=f"No se pudo desactivar el paquete {package_code}.", detail="No se pudo desactivar el paquete.") from error
+            try:  # La baja ya se confirmó: la relectura no debe traducir bloqueos a 503.
+                with closing(sqlite3.connect(str(resolved_database), timeout=10)) as connection:  # Abre una lectura posterior al commit.
+                    row = PaqueteDao(connection).obtener_paquete(package_code, incluir_inactivo=True)  # Lee el estado final para responder.
+            except sqlite3.Error as error:  # Un fallo de relectura responde 500, no 503, porque la baja ya se confirmó.
+                logger.exception("No se pudo recuperar el paquete desactivado %s.", package_code)  # Permite diagnosticar la anomalía.
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo recuperar el paquete desactivado.") from error  # Informa anomalía al cliente.
         if row is None:  # Protege frente a una lectura inconsistente posterior a la baja.
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo recuperar el paquete desactivado.")  # Informa anomalía al cliente.
         return _admin_package_response(row)  # Confirma el estado inactivo y preserva el historial asociado.
@@ -606,7 +665,7 @@ def create_app(
         idempotency_key: Annotated[str | None, Header(alias="X-Idempotency-Key", min_length=1, max_length=128)] = None,  # Acepta opcionalmente una clave de reintento acotada.
     ) -> ReservationResponse:
         """Compra cupos mediante CompraService y aplica un límite por usuario."""
-        if not rate_limiter.allow_request(identity.rut, limit=10, window_seconds=60, scope="reservation:create"):  # Evita abuso de creación de reservas por cuenta.
+        if not check_rate_limit(identity.rut, limit=10, window_seconds=60, scope="reservation:create"):  # Evita abuso de creación de reservas por cuenta.
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Demasiadas solicitudes de reserva; reintente más tarde.")  # Informa límite excedido sin llamar a compra.
         try:  # Ejecuta descuento de cupos y creación de recibo en una transacción atómica.
             purchase_result = compra_service.purchase_idempotently(  # Gestiona compra nueva o reproduce un recibo ya confirmado.

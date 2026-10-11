@@ -6,6 +6,7 @@ import unittest  # Ejecuta escenarios integrados con la biblioteca estándar.
 from contextlib import closing  # Cierra conexiones SQLite de fixtures y verificaciones.
 from datetime import date  # Da a la configuración de inventario y reservas un día explícito.
 from pathlib import Path  # Construye rutas independientes del directorio actual.
+from unittest.mock import patch  # Simula bloqueos SQLite en las operaciones de paquetes.
 
 from fastapi.testclient import TestClient  # Invoca la API ASGI sin abrir puertos ni servicios externos.
 
@@ -218,6 +219,106 @@ class PackageAdminApiTests(unittest.TestCase):
                 PaqueteDao(connection).crear_tabla()  # Ejecuta el cambio aditivo y confirma la migración.
                 migrated = connection.execute("SELECT codigo, activo FROM paquetes").fetchone()  # Comprueba clave y valor predeterminado.
             self.assertEqual(migrated, (307, 1))  # Verifica que la fila sigue intacta y publicada.
+
+    def _create_body(self, code: int) -> dict[str, object]:
+        """Devuelve un cuerpo válido de paquete nacional para las pruebas de persistencia."""
+        return {"codigo": code, "nombre": "Paquete de borde", "duracion": 3, "precio_base": 50000, "tipo": "nacional"}
+
+    def _update_body(self) -> dict[str, object]:
+        """Devuelve un cuerpo válido de edición para las pruebas de persistencia."""
+        return {"nombre": "Paquete editado", "duracion": 4, "precio_base": 60000, "tipo": "nacional"}
+
+    def test_create_package_returns_503_when_write_locked(self) -> None:
+        """Un lock de SQLite en el alta responde 503 con Retry-After, no 500."""
+        with patch.object(PaqueteDao, "insertar_paquete", side_effect=sqlite3.OperationalError("database is locked")):  # Simula la escritura bloqueada.
+            response = self.client.post(  # Invoca el alta administrativa real.
+                "/admin/paquetes",  # Ruta que escribe el catálogo.
+                headers=self._admin_headers(),  # Autoriza con rol administrador.
+                json=self._create_body(401),  # Cuerpo válido del subtipo nacional.
+            )  # El bloqueo debe clasificarse como indisponibilidad transitoria.
+        self.assertEqual(response.status_code, 503, response.text)  # Exige 503 en lugar de 500.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Indica cuándo reintentar.
+
+    def test_update_package_returns_503_when_write_locked(self) -> None:
+        """Un lock de SQLite en la edición responde 503 con Retry-After."""
+        self._create_national_package(402)  # Deja un paquete activo editable.
+        with patch.object(PaqueteDao, "actualizar_paquete", side_effect=sqlite3.OperationalError("database is locked")):  # Simula la escritura bloqueada.
+            response = self.client.put(  # Invoca la edición administrativa real.
+                "/admin/paquetes/402",  # Identifica el paquete activo.
+                headers=self._admin_headers(),  # Autoriza con rol administrador.
+                json=self._update_body(),  # Cuerpo válido de edición.
+            )  # El bloqueo debe clasificarse como indisponibilidad transitoria.
+        self.assertEqual(response.status_code, 503, response.text)  # Exige 503 en lugar de 500.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Indica cuándo reintentar.
+
+    def test_delete_package_returns_503_when_write_locked(self) -> None:
+        """Un lock de SQLite en la baja responde 503 con Retry-After."""
+        self._create_national_package(403)  # Deja un paquete activo que será dado de baja.
+        with patch.object(PaqueteDao, "eliminar_paquete", side_effect=sqlite3.OperationalError("database is locked")):  # Simula la baja bloqueada.
+            response = self.client.delete(  # Invoca la baja lógica real.
+                "/admin/paquetes/403",  # Identifica el paquete activo.
+                headers=self._admin_headers(),  # Autoriza con rol administrador.
+            )  # El bloqueo debe clasificarse como indisponibilidad transitoria.
+        self.assertEqual(response.status_code, 503, response.text)  # Exige 503 en lugar de 500.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Indica cuándo reintentar.
+
+    def test_public_catalog_returns_503_when_read_locked(self) -> None:
+        """Un lock de SQLite en la lectura pública del catálogo responde 503."""
+        with patch.object(PaqueteDao, "obtener_paquetes", side_effect=sqlite3.OperationalError("database is locked")):  # Simula la lectura bloqueada.
+            response = self.client.get("/paquetes")  # Invoca el catálogo público real.
+        self.assertEqual(response.status_code, 503, response.text)  # Exige 503 en lugar de 500.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Indica cuándo reintentar.
+
+    def test_admin_catalog_returns_503_when_read_locked(self) -> None:
+        """Un lock de SQLite en la lectura administrativa responde 503."""
+        headers = self._admin_headers()  # Obtiene el JWT antes de simular el bloqueo.
+        with patch.object(PaqueteDao, "obtener_paquetes_admin", side_effect=sqlite3.OperationalError("database is locked")):  # Simula la lectura bloqueada.
+            response = self.client.get("/admin/paquetes", headers=headers)  # Invoca el listado administrativo real.
+        self.assertEqual(response.status_code, 503, response.text)  # Exige 503 en lugar de 500.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Indica cuándo reintentar.
+
+    def test_create_package_returns_500_when_sql_error_is_permanent(self) -> None:
+        """Un error SQLite no transitorio conserva el 500 y su detalle actual."""
+        with patch.object(PaqueteDao, "insertar_paquete", side_effect=sqlite3.OperationalError("near 'BROKEN': syntax error")):  # Simula un error que no es lock.
+            response = self.client.post(  # Invoca el alta administrativa real.
+                "/admin/paquetes",  # Ruta que escribe el catálogo.
+                headers=self._admin_headers(),  # Autoriza con rol administrador.
+                json=self._create_body(404),  # Cuerpo válido del subtipo nacional.
+            )  # Un error permanente no debe presentarse como indisponibilidad.
+        self.assertEqual(response.status_code, 500, response.text)  # Conserva el 500 actual.
+        self.assertEqual(response.json()["detail"], "No se pudo persistir el paquete.")  # Mensaje estable sin SQL.
+
+    def test_create_package_post_commit_read_failure_returns_500(self) -> None:
+        """Si la lectura posterior al commit falla, el alta responde 500 y no 503."""
+        with patch.object(PaqueteDao, "obtener_paquete", side_effect=sqlite3.OperationalError("database is locked")):  # Simula bloqueo solo en la relectura.
+            response = self.client.post(  # La escritura se confirma antes de la lectura posterior.
+                "/admin/paquetes",  # Ruta que escribe y relee el catálogo.
+                headers=self._admin_headers(),  # Autoriza con rol administrador.
+                json=self._create_body(405),  # Cuerpo válido del subtipo nacional.
+            )  # La escritura ya se confirmó: repetir la baja duplicaría el alta.
+        self.assertEqual(response.status_code, 500, response.text)  # No debe ser 503 tras el commit.
+        self.assertEqual(response.json()["detail"], "El paquete se creó, pero no pudo recuperarse.")  # Mensaje existente del caso.
+
+    def test_delete_package_post_commit_read_failure_returns_500(self) -> None:
+        """Si la lectura posterior a la baja falla, responde 500 y no 503."""
+        self._create_national_package(406)  # Deja un paquete activo que será dado de baja.
+        original = PaqueteDao.obtener_paquete  # Conserva la lectura real para la relectura previa.
+        calls = {"count": 0}  # Distingue la lectura previa de la posterior al commit.
+
+        def flaky_read(self: PaqueteDao, codigo: int, *, incluir_inactivo: bool = False) -> tuple | None:
+            """Falla solo en la segunda lectura, ya con la baja confirmada."""
+            calls["count"] += 1  # Cuenta cada lectura del endpoint.
+            if calls["count"] >= 2:  # La segunda lectura es la posterior al commit.
+                raise sqlite3.OperationalError("database is locked")  # Simula el bloqueo en la relectura.
+            return original(self, codigo, incluir_inactivo=incluir_inactivo)  # La lectura previa funciona normalmente.
+
+        with patch.object(PaqueteDao, "obtener_paquete", flaky_read):  # Simula bloqueo solo tras el commit.
+            response = self.client.delete(  # Invoca la baja lógica real.
+                "/admin/paquetes/406",  # Identifica el paquete activo.
+                headers=self._admin_headers(),  # Autoriza con rol administrador.
+            )  # La baja ya se confirmó: repetirla sería idempotente, pero no debe devolver 503.
+        self.assertEqual(response.status_code, 500, response.text)  # No debe ser 503 tras el commit.
+        self.assertEqual(response.json()["detail"], "No se pudo recuperar el paquete desactivado.")  # Mensaje existente del caso.
 
 
 if __name__ == "__main__":  # Permite ejecutar este módulo de forma directa.

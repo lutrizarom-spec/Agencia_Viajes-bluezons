@@ -24,6 +24,11 @@ from services.compra_service import (  # Accede a la compra y a los errores tran
     PaymentTransitionConflictError,
     PurchasePersistenceError,
 )
+from services.rate_limiter import (  # Verifica la traducción de bloqueos del limitador.
+    RateLimiter,
+    RateLimiterBusyError,
+    RateLimiterPersistenceError,
+)
 
 TRAVEL_DATE = date(2026, 12, 15)
 TRAVEL_DATE_JSON = TRAVEL_DATE.isoformat()
@@ -906,6 +911,59 @@ class ApiEdgeCaseTests(unittest.TestCase):
                 service.purchase_idempotently("10.000.013-K", 202, 1, travel_date=TRAVEL_DATE)  # Compra sin clave con la política de retry.
         self.assertEqual(purchase_attempt.call_count, 2)  # Respeta el máximo configurado.
         sleep.assert_called_once_with(0)  # Usa la pausa configurada entre el primer y segundo intento.
+
+    def test_rate_limiter_translates_locked_operational_error(self) -> None:
+        """Un lock de SQLite se traduce a RateLimiterBusyError."""
+        limiter = RateLimiter(self.database_path)  # Reutiliza la base temporal ya inicializada.
+        with patch("services.rate_limiter.sqlite3.connect") as connect:  # Intercepta la conexión del limitador.
+            connect.return_value.execute.side_effect = sqlite3.OperationalError("database is locked")  # Simula SQLITE_BUSY.
+            with self.assertRaises(RateLimiterBusyError):  # Exige el error de dominio de bloqueo.
+                limiter.allow_request("10.000.013-K", limit=5, window_seconds=60)  # Registra el intento bloqueado.
+
+    def test_rate_limiter_translates_permanent_operational_error(self) -> None:
+        """Un error SQL no transitorio se traduce a RateLimiterPersistenceError."""
+        limiter = RateLimiter(self.database_path)  # Reutiliza la base temporal del escenario.
+        with patch("services.rate_limiter.sqlite3.connect") as connect:  # Intercepta la conexión del limitador.
+            connect.return_value.execute.side_effect = sqlite3.OperationalError("near 'BROKEN': syntax error")  # Error permanente.
+            with self.assertRaises(RateLimiterPersistenceError):  # Exige el error de persistencia.
+                limiter.allow_request("10.000.013-K", limit=5, window_seconds=60)  # Registra el intento fallido.
+
+    def test_login_returns_503_when_rate_limiter_database_locked(self) -> None:
+        """Un lock del limitador responde 503 con Retry-After en lugar de 500."""
+        with patch("services.rate_limiter.sqlite3.connect") as connect:  # Simula la base del limitador ocupada.
+            connect.return_value.execute.side_effect = sqlite3.OperationalError("database is locked")  # Fuerza SQLITE_BUSY al registrar el intento.
+            response = self.client.post(  # Invoca el login real de la API.
+                "/auth/login",  # Ruta pública que aplica límite por RUT.
+                json={"rut": "10.000.013-K", "password": "cliente-seguro-local-2026"},  # Credenciales válidas del fixture.
+            )  # El limitador debe fallar cerrado y traducir el bloqueo.
+        self.assertEqual(response.status_code, 503, response.text)  # Exige indisponibilidad temporal, no 500.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Indica cuándo reintentar.
+
+    def test_create_reservation_returns_503_when_rate_limiter_database_locked(self) -> None:
+        """Un lock del limitador responde 503 y evita llamar a la compra."""
+        headers = self._client_headers()  # Obtiene un JWT válido antes de simular el bloqueo.
+        service = self.app.state.compra_service  # Servicio real compartido por la API.
+        with patch("services.rate_limiter.sqlite3.connect") as connect, patch.object(service, "purchase_idempotently") as purchase:  # Simula lock y espía la compra.
+            connect.return_value.execute.side_effect = sqlite3.OperationalError("database is locked")  # Fuerza SQLITE_BUSY en el limiter.
+            response = self.client.post(  # Invoca el endpoint real de reservas.
+                "/reservas",  # Ruta protegida que primero aplica el límite.
+                json={"package_code": 202, "quantity": 1, "travel_date": TRAVEL_DATE_JSON},  # Cuerpo válido del paquete fixture.
+                headers=headers,  # Identidad del titular autenticado.
+            )  # El limiter debe cortar antes de la transacción de compra.
+        self.assertEqual(response.status_code, 503, response.text)  # Exige indisponibilidad temporal.
+        self.assertEqual(response.headers.get("Retry-After"), "1")  # Conserva la indicación de reintento.
+        purchase.assert_not_called()  # El límite falla cerrado y no ejecuta la compra.
+
+    def test_login_returns_500_when_rate_limiter_sql_error_is_permanent(self) -> None:
+        """Un error SQL no transitorio del limitador responde 500 sin exponer SQL."""
+        with patch("services.rate_limiter.sqlite3.connect") as connect:  # Simula un fallo permanente de SQLite.
+            connect.return_value.execute.side_effect = sqlite3.OperationalError("near 'BROKEN': syntax error")  # Error que no es lock.
+            response = self.client.post(  # Invoca el login real.
+                "/auth/login",  # Ruta que primero aplica el límite.
+                json={"rut": "10.000.013-K", "password": "cliente-seguro-local-2026"},  # Credenciales válidas del fixture.
+            )  # El endpoint debe traducir el error de persistencia.
+        self.assertEqual(response.status_code, 500, response.text)  # Un error permanente es 500, no 503.
+        self.assertEqual(response.json()["detail"], "No se pudo verificar el límite de solicitudes.")  # Mensaje estable sin SQL.
 
 
 if __name__ == "__main__":  # Permite ejecutar estos casos directamente con Python.

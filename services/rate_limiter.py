@@ -10,6 +10,14 @@ from contextlib import closing  # Cierra las conexiones SQLite al concluir cada 
 from pathlib import Path  # Acepta rutas de base de datos como texto o Path.
 
 
+class RateLimiterBusyError(RuntimeError):
+    """Indica que la base del limitador permaneció bloqueada y conviene reintentar."""
+
+
+class RateLimiterPersistenceError(RuntimeError):
+    """Indica un fallo de persistencia no transitorio del limitador."""
+
+
 class RateLimiter:
     """Aplica un límite por identificador y ámbito usando una ventana fija."""
 
@@ -61,77 +69,94 @@ class RateLimiter:
         key_material = len(scope_bytes).to_bytes(4, "big") + scope_bytes  # Prefija la longitud para que ámbito y cliente no colisionen al concatenarse.
         bucket_key = hashlib.sha256(key_material + identifier_bytes).hexdigest()  # Usa un hash fijo como clave primaria anónima del bucket.
 
-        with closing(sqlite3.connect(self._database_path, timeout=10)) as connection:
-            with connection:  # Agrupa actualización y limpieza en una transacción SQLite.
-                # UPSERT serializa cada clave dentro de SQLite, evitando que dos
-                # solicitudes concurrentes superen el límite por leer el mismo contador.
-                row = connection.execute(
-                    """
-                    INSERT INTO rate_limit_buckets (
-                        bucket_key, window_started_at, window_seconds, expires_at,
-                        request_count, last_request_allowed
+        try:  # Traduce fallos de SQLite a errores de dominio del limitador.
+            with closing(sqlite3.connect(self._database_path, timeout=10)) as connection:
+                with connection:  # Agrupa actualización y limpieza en una transacción SQLite.
+                    # UPSERT serializa cada clave dentro de SQLite, evitando que dos
+                    # solicitudes concurrentes superen el límite por leer el mismo contador.
+                    row = connection.execute(
+                        """
+                        INSERT INTO rate_limit_buckets (
+                            bucket_key, window_started_at, window_seconds, expires_at,
+                            request_count, last_request_allowed
+                        )
+                        VALUES (?, ?, ?, ?, 1, 1)
+                        ON CONFLICT (bucket_key) DO UPDATE SET
+                            window_started_at = CASE
+                                WHEN excluded.window_seconds
+                                     != rate_limit_buckets.window_seconds
+                                     OR excluded.window_started_at
+                                        >= rate_limit_buckets.expires_at
+                                THEN excluded.window_started_at
+                                ELSE rate_limit_buckets.window_started_at
+                            END,
+                            window_seconds = excluded.window_seconds,
+                            expires_at = CASE
+                                WHEN excluded.window_seconds
+                                     != rate_limit_buckets.window_seconds
+                                     OR excluded.window_started_at
+                                        >= rate_limit_buckets.expires_at
+                                THEN excluded.expires_at
+                                ELSE rate_limit_buckets.expires_at
+                            END,
+                            request_count = CASE
+                                WHEN excluded.window_seconds
+                                     != rate_limit_buckets.window_seconds
+                                     OR excluded.window_started_at
+                                        >= rate_limit_buckets.expires_at
+                                THEN 1
+                                WHEN rate_limit_buckets.request_count < ?
+                                THEN rate_limit_buckets.request_count + 1
+                                ELSE rate_limit_buckets.request_count
+                            END,
+                            last_request_allowed = CASE
+                                WHEN excluded.window_seconds
+                                     != rate_limit_buckets.window_seconds
+                                     OR excluded.window_started_at
+                                        >= rate_limit_buckets.expires_at
+                                THEN 1
+                                WHEN rate_limit_buckets.request_count < ?
+                                THEN 1
+                                ELSE 0
+                            END
+                        RETURNING last_request_allowed
+                        """,
+                            # Los valores variables se enlazan como parámetros; no se insertan en el SQL.
+                            (
+                                bucket_key,
+                                current_time,
+                            window_seconds,
+                            current_time + window_seconds,
+                            limit,
+                            limit,
+                        ),
+                    ).fetchone()  # Lee el veredicto producido por la misma operación atómica.
+                    # Borra entradas vencidas para controlar el crecimiento de la tabla
+                    # y solo afecta buckets cuyo tiempo de expiración ya fue alcanzado.
+                    connection.execute(
+                        "DELETE FROM rate_limit_buckets WHERE expires_at <= ?",
+                        (current_time,),
                     )
-                    VALUES (?, ?, ?, ?, 1, 1)
-                    ON CONFLICT (bucket_key) DO UPDATE SET
-                        window_started_at = CASE
-                            WHEN excluded.window_seconds
-                                 != rate_limit_buckets.window_seconds
-                                 OR excluded.window_started_at
-                                    >= rate_limit_buckets.expires_at
-                            THEN excluded.window_started_at
-                            ELSE rate_limit_buckets.window_started_at
-                        END,
-                        window_seconds = excluded.window_seconds,
-                        expires_at = CASE
-                            WHEN excluded.window_seconds
-                                 != rate_limit_buckets.window_seconds
-                                 OR excluded.window_started_at
-                                    >= rate_limit_buckets.expires_at
-                            THEN excluded.expires_at
-                            ELSE rate_limit_buckets.expires_at
-                        END,
-                        request_count = CASE
-                            WHEN excluded.window_seconds
-                                 != rate_limit_buckets.window_seconds
-                                 OR excluded.window_started_at
-                                    >= rate_limit_buckets.expires_at
-                            THEN 1
-                            WHEN rate_limit_buckets.request_count < ?
-                            THEN rate_limit_buckets.request_count + 1
-                            ELSE rate_limit_buckets.request_count
-                        END,
-                        last_request_allowed = CASE
-                            WHEN excluded.window_seconds
-                                 != rate_limit_buckets.window_seconds
-                                 OR excluded.window_started_at
-                                    >= rate_limit_buckets.expires_at
-                            THEN 1
-                            WHEN rate_limit_buckets.request_count < ?
-                            THEN 1
-                            ELSE 0
-                        END
-                    RETURNING last_request_allowed
-                    """,
-                        # Los valores variables se enlazan como parámetros; no se insertan en el SQL.
-                        (
-                            bucket_key,
-                            current_time,
-                        window_seconds,
-                        current_time + window_seconds,
-                        limit,
-                        limit,
-                    ),
-                ).fetchone()  # Lee el veredicto producido por la misma operación atómica.
-                # Borra entradas vencidas para controlar el crecimiento de la tabla
-                # y solo afecta buckets cuyo tiempo de expiración ya fue alcanzado.
-                connection.execute(
-                    "DELETE FROM rate_limit_buckets WHERE expires_at <= ?",
-                    (current_time,),
-                )
+        except sqlite3.OperationalError as error:  # Distingue bloqueos transitorios de fallos permanentes.
+            if self._is_database_locked(error):  # Reconoce solo BUSY/LOCKED como condición reintentable.
+                raise RateLimiterBusyError("La base del limitador está bloqueada; reintente más tarde.") from error
+            raise RateLimiterPersistenceError("No se pudo registrar el límite de solicitudes.") from error
+        except sqlite3.Error as error:  # Cualquier otro fallo de SQLite es permanente para esta solicitud.
+            raise RateLimiterPersistenceError("No se pudo registrar el límite de solicitudes.") from error
         # Una ausencia de RETURNING señala un fallo inesperado de la base, no un rechazo normal.
         if row is None:
             raise RuntimeError("SQLite no devolvió el resultado del limitador.")  # Evita tratar un resultado incompleto como una petición permitida.
         return bool(row[0])  # Convierte 0/1 de SQLite al veredicto booleano de la API del limitador.
+
+    @staticmethod
+    def _is_database_locked(error: sqlite3.OperationalError) -> bool:
+        """Reconoce solo errores SQLite BUSY/LOCKED, nunca sintaxis u otros fallos."""
+        error_code = getattr(error, "sqlite_errorcode", None)  # Obtiene el código extendido disponible en las versiones actuales de sqlite3.
+        if error_code is not None:  # Prefiere el código estable cuando Python lo proporciona.
+            primary_code = error_code & 0xFF  # SQLite guarda el código primario en los ocho bits inferiores.
+            return primary_code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)  # Solo bloqueos se consideran transitorios.
+        message = str(error).casefold()  # Compatibilidad con runtimes antiguos que no exponen sqlite_errorcode.
+        return "database is locked" in message or "database table is locked" in message  # Usa mensajes exactos conocidos como fallback limitado.
 
     def _ensure_schema(self) -> None:
         """Crea la tabla de conteo y el índice que acelera la limpieza de vencidos."""
