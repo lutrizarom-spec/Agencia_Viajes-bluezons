@@ -86,5 +86,11 @@ class Detalle_Reserva:
     def subtotal(self) -> float:
         return self.__subtotal
 
+    def _restaurar_subtotal_persistido(self, subtotal: float) -> None:
+        """Restaura el subtotal histórico sin recalcularlo con el precio actual."""
+        if not math.isfinite(subtotal) or subtotal <= 0:
+            raise ValueError("El subtotal debe ser finito y positivo.")
+        self.__subtotal = subtotal
+
     def calcular_subtotal(self) -> float:
         return self.subtotal

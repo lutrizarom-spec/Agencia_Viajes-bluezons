@@ -169,6 +169,21 @@ class ReservaPersistenciaTests(unittest.TestCase):
         self.assertIsInstance(recuperado, Hotel_Estancia)
         self.assertEqual(recuperado.noches, 2)
 
+    def test_total_no_cambia_al_modificar_el_precio_del_servicio(self) -> None:
+        original = _reserva_con_servicios()
+        self.dao.guardar_reserva(original)
+        total_original = original.total
+
+        self.dao.guardar_servicio(
+            Hotel_Estancia(2, "Hotel Miraflores", "Lima", "Sudamérica", 190000.0, 3)
+        )
+
+        with closing(crear_conexion(self.db_path)) as otra_conexion:
+            recuperada = ReservaDao(otra_conexion).obtener_reserva("RES-701")
+
+        self.assertIsNotNone(recuperada)
+        self.assertEqual(recuperada.total, total_original)
+
 
 if __name__ == "__main__":
     unittest.main()

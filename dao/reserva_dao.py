@@ -236,7 +236,7 @@ class ReservaDao(Dao):
 
         detalle_rows = self.cursor.execute(
             """
-            SELECT id_detalle, tipo_item, cantidad, id_servicio
+            SELECT id_detalle, tipo_item, cantidad, subtotal, id_servicio
             FROM detalle_reserva
             WHERE numero_reserva = ?
             ORDER BY orden
@@ -244,7 +244,7 @@ class ReservaDao(Dao):
             (numero,),
         ).fetchall()
         detalles: list[Detalle_Reserva] = []
-        for id_detalle, tipo_item, cantidad, id_servicio in detalle_rows:
+        for id_detalle, tipo_item, cantidad, subtotal, id_servicio in detalle_rows:
             referencia: Paquete_Turistico | Servicio_Turistico
             if tipo_item == "servicio":
                 servicio = self.obtener_servicio(int(id_servicio))
@@ -253,9 +253,11 @@ class ReservaDao(Dao):
                 referencia = servicio
             else:
                 referencia = paquete
-            detalles.append(
-                Detalle_Reserva(int(id_detalle), referencia, int(cantidad), float(tasa))
+            detalle = Detalle_Reserva(
+                int(id_detalle), referencia, int(cantidad), float(tasa)
             )
+            detalle._restaurar_subtotal_persistido(float(subtotal))
+            detalles.append(detalle)
         reserva._restaurar_desde_persistencia(detalles, estado)
         return reserva
 
