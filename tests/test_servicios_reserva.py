@@ -1,5 +1,6 @@
 """Pruebas de los servicios turísticos y de la reserva con varios servicios."""
 
+import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
@@ -9,6 +10,7 @@ from pathlib import Path
 from conectar import crear_conexion
 from dao.reserva_dao import ReservaDao
 from model.cliente import Cliente
+from model.detalle_reserva_inconsistente_error import DetalleReservaInconsistenteError
 from model.excursion import Excursion
 from model.hotel_estancia import Hotel_Estancia
 from model.linea_vuelo import Linea_Vuelo
@@ -183,6 +185,36 @@ class ReservaPersistenciaTests(unittest.TestCase):
 
         self.assertIsNotNone(recuperada)
         self.assertEqual(recuperada.total, total_original)
+
+    def test_servicio_referenciado_inexistente_lanza_error(self) -> None:
+        self.dao.guardar_reserva(_reserva_con_servicios())
+
+        with closing(sqlite3.connect(self.db_path)) as cruda:
+            cruda.execute(
+                """
+                INSERT INTO detalle_reserva (
+                    id_detalle, numero_reserva, orden, tipo_item,
+                    cantidad, subtotal, paquete_codigo, id_servicio
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (99, "RES-701", 99, "servicio", 1, 100.0, None, 999),
+            )
+            cruda.commit()
+
+        with closing(crear_conexion(self.db_path)) as otra_conexion:
+            with self.assertRaises(DetalleReservaInconsistenteError) as contexto:
+                ReservaDao(otra_conexion).obtener_reserva("RES-701")
+
+        mensaje = str(contexto.exception)
+        self.assertIn("RES-701", mensaje)
+        self.assertIn("99", mensaje)
+        self.assertIn("999", mensaje)
+
+    def test_integridad_de_conteo_detecta_detalle_omitido(self) -> None:
+        with self.assertRaises(DetalleReservaInconsistenteError):
+            ReservaDao._validar_detalles_completos("RES-701", 2, [])
+        ReservaDao._validar_detalles_completos("RES-701", 0, [])
 
 
 if __name__ == "__main__":

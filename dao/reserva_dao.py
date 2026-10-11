@@ -14,6 +14,7 @@ from dao.dao import Dao
 from dao.paquete_dao import PaqueteDao
 from model.cliente import Cliente
 from model.detalle_reserva import Detalle_Reserva
+from model.detalle_reserva_inconsistente_error import DetalleReservaInconsistenteError
 from model.excursion import Excursion
 from model.hotel_estancia import Hotel_Estancia
 from model.linea_vuelo import Linea_Vuelo
@@ -249,7 +250,10 @@ class ReservaDao(Dao):
             if tipo_item == "servicio":
                 servicio = self.obtener_servicio(int(id_servicio))
                 if servicio is None:
-                    continue
+                    raise DetalleReservaInconsistenteError(
+                        f"El detalle {id_detalle} de la reserva {numero} referencia "
+                        f"al servicio {id_servicio}, que no existe."
+                    )
                 referencia = servicio
             else:
                 referencia = paquete
@@ -258,8 +262,22 @@ class ReservaDao(Dao):
             )
             detalle._restaurar_subtotal_persistido(float(subtotal))
             detalles.append(detalle)
+        self._validar_detalles_completos(numero, len(detalle_rows), detalles)
         reserva._restaurar_desde_persistencia(detalles, estado)
         return reserva
+
+    @staticmethod
+    def _validar_detalles_completos(
+        numero_reserva: str,
+        filas_persistidas: int,
+        detalles: list[Detalle_Reserva],
+    ) -> None:
+        """Impide devolver una reserva cuando no se reconstruyeron todos los detalles."""
+        if len(detalles) != filas_persistidas:
+            raise DetalleReservaInconsistenteError(
+                f"Se reconstruyeron {len(detalles)} de {filas_persistidas} detalles "
+                f"de la reserva {numero_reserva}."
+            )
 
     def _upsert_servicio(self, servicio: Servicio_Turistico) -> None:
         tipo = _TIPOS_SERVICIO.get(type(servicio), "generico")
