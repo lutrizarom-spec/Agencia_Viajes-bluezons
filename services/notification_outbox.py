@@ -11,13 +11,12 @@ import uuid
 from collections.abc import Mapping
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from hashlib import sha256
 from os import environ
 from pathlib import Path
 from typing import Protocol
-
 
 BACKOFF_SECONDS = (1, 5, 30, 300)
 
@@ -222,8 +221,8 @@ class OutboxRepository:
         if isinstance(event_id, bool) or not isinstance(event_id, int) or event_id < 1:
             raise ValueError("event_id debe ser un entero positivo.")
         current_iso = (
-            now or datetime.now(timezone.utc)
-        ).astimezone(timezone.utc).isoformat()
+            now or datetime.now(UTC)
+        ).astimezone(UTC).isoformat()
         with closing(sqlite3.connect(self.database_path, timeout=10)) as connection:
             with connection:
                 updated = connection.execute(
@@ -250,7 +249,7 @@ class OutboxRepository:
     ) -> list[OutboxMessage]:
         if limit < 1 or lease_seconds < 1:
             raise ValueError("limit y lease_seconds deben ser positivos.")
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        current = (now or datetime.now(UTC)).astimezone(UTC)
         current_iso = current.isoformat()
         lease_until = (current + timedelta(seconds=lease_seconds)).isoformat()
         claimed: list[OutboxMessage] = []
@@ -309,7 +308,7 @@ class OutboxRepository:
                     WHERE id = ? AND status = 'processing' AND claim_token = ?
                     """,
                     (
-                        (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(),
+                        (now or datetime.now(UTC)).astimezone(UTC).isoformat(),
                         message.id,
                         message.claim_token,
                     ),
@@ -329,7 +328,7 @@ class OutboxRepository:
         attempts = message.attempts + 1
         dead = attempts >= max_attempts
         delay = backoff_seconds[min(attempts - 1, len(backoff_seconds) - 1)]
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        current = (now or datetime.now(UTC)).astimezone(UTC)
         next_attempt = current + timedelta(seconds=0 if dead else delay)
         with closing(sqlite3.connect(self.database_path, timeout=10)) as connection:
             with connection:

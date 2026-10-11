@@ -4,8 +4,8 @@ import concurrent.futures  # Ejecuta compras paralelas para comprobar que no se 
 import sqlite3  # Comprueba persistencia de contraseñas y prepara paquetes de prueba.
 import tempfile  # Mantiene cada escenario aislado en una base SQLite descartable.
 import unittest  # Ejecuta aserciones de integración sin servicios externos.
-from datetime import date  # Configura cupos y reservas para una fecha de viaje concreta.
 from contextlib import closing  # Cierra conexiones de fixture en Windows al finalizar cada preparación.
+from datetime import date  # Configura cupos y reservas para una fecha de viaje concreta.
 from pathlib import Path  # Construye rutas portables para la base temporal.
 
 from fastapi.testclient import TestClient  # Envía solicitudes ASGI dentro del mismo proceso, sin abrir puertos.

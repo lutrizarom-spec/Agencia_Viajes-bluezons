@@ -12,6 +12,7 @@ from model.anticipo_insuficiente_error import AnticipoInsuficienteError
 from model.cliente import Cliente
 from model.pago import Pago
 from model.paquete_crucero import Paquete_Crucero
+from model.paquete_factory import paquete_desde_columnas
 from model.paquete_internacional import Paquete_Internacional
 from model.paquete_nacional import Paquete_Nacional
 from model.paquete_turistico import Paquete_Turistico
@@ -120,16 +121,7 @@ def leer_tipo(leer, mostrar) -> str:
 
 def construir_paquete(fila: tuple) -> Paquete_Turistico:
     """Reconstruye el subtipo correcto a partir de una fila del catálogo."""
-    codigo, nombre, duracion, precio_base, tipo, pasaporte, impuesto, *_ = fila
-    if tipo == "internacional":
-        return Paquete_Internacional(
-            codigo, nombre, duracion, precio_base, bool(pasaporte)
-        )
-    if tipo == "crucero":
-        return Paquete_Crucero(codigo, nombre, duracion, precio_base, impuesto)
-    if tipo == "nacional":
-        return Paquete_Nacional(codigo, nombre, duracion, precio_base)
-    return Paquete_Turistico(codigo, nombre, duracion, precio_base)
+    return paquete_desde_columnas(*fila[:7])  # Fuente única del mapeo tipo→modelo.
 
 
 def _pedir_campos_comunes(leer, mostrar) -> tuple[str, int, float]:

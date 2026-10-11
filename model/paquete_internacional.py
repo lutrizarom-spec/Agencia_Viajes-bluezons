@@ -6,7 +6,13 @@ from model.paquete_turistico import Paquete_Turistico
 
 
 class Paquete_Internacional(Paquete_Turistico):
-    """Convierte el precio base y requiere que el cliente tenga pasaporte."""
+    """Convierte el precio base y requiere que el cliente tenga pasaporte.
+
+    ``pasaporte_valido`` es informativo: registra cómo quedó marcado el paquete
+    en el catálogo. La exigencia real de pasaporte la determina el tipo
+    internacional (``requiere_pasaporte``) y el pasaporte del cliente al
+    reservar; el flag no altera el cálculo de precio.
+    """
 
     def __init__(
         self,

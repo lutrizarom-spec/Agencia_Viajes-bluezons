@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import bcrypt  # Deriva y verifica hashes de contraseña resistentes a fuerza bruta.
-import jwt  # Firma y valida tokens de acceso sin persistir sesiones en la base.
 import re  # Normaliza la escritura del RUT y valida su formato chileno.
 import secrets  # Genera un hash ficticio para igualar el coste de logins con RUT inexistente.
 import sqlite3  # Guarda las cuentas locales en la base de datos de la aplicación.
 from contextlib import closing  # Cierra cada conexión aunque una consulta lance una excepción.
 from dataclasses import dataclass  # Modela una identidad autenticada inmutable.
-from datetime import datetime, timedelta, timezone  # Define expiraciones JWT en UTC.
+from datetime import UTC, datetime, timedelta  # Define expiraciones JWT en UTC.
 from enum import StrEnum  # Define roles textuales estables para la API y el token.
 from pathlib import Path  # Acepta rutas SQLite portables.
+
+import bcrypt  # Deriva y verifica hashes de contraseña resistentes a fuerza bruta.
+import jwt  # Firma y valida tokens de acceso sin persistir sesiones en la base.
 
 
 class UserRole(StrEnum):
@@ -159,7 +160,7 @@ class AuthService:
 
     def _create_access_token(self, identity: UserIdentity) -> str:
         """Firma un JWT corto que contiene subject, rol y tiempos estándar."""
-        issued_at = datetime.now(timezone.utc)  # Usa UTC para evitar ambigüedades de huso horario.
+        issued_at = datetime.now(UTC)  # Usa UTC para evitar ambigüedades de huso horario.
         claims = {  # Construye el conjunto mínimo de afirmaciones necesarias para autorizar.
             "sub": identity.rut,  # Subject estable de usuario expresado en RUT normalizado.
             "role": identity.role.value,  # Rol usado por la API para autorizar acciones administrativas.

@@ -4,8 +4,8 @@ import sqlite3  # Prepara esquemas legados y comprueba la evolución compatible 
 import tempfile  # Aísla cada prueba en una base SQLite temporal que se elimina al final.
 import unittest  # Proporciona las clases de prueba y las aserciones del proyecto.
 from contextlib import closing  # Cierra explícitamente bases temporales antes de eliminarlas en Windows.
-from unittest.mock import patch  # Sustituye urlopen por una respuesta controlada durante el test.
 from pathlib import Path  # Construye rutas de base portables en todos los entornos.
+from unittest.mock import patch  # Sustituye urlopen por una respuesta controlada durante el test.
 
 from services.fx_service import (  # Importa las piezas del servicio FX que se verifican.
     FxService,  # Servicio que valida y guarda tasas recibidas del proveedor.

@@ -13,23 +13,6 @@ class Cliente {
     -pasaporte: String
     -correo: String
     +validar_pasaporte(): boolean
-    +solicitar_reserva(): boolean
-    +consultar_itinerario(): String
-}
-
-class Empleado {
-    -id_empleado: int
-}
-
-class Administrador {
-    +gestionar_proveedor(): void
-    +aprobar_pago(): void
-}
-
-class Agente_Viajes {
-    +atender_cliente(): void
-    +crear_reserva(): boolean
-    +vender_paquete(): boolean
 }
 
 class Paquete_Turistico {
@@ -37,8 +20,8 @@ class Paquete_Turistico {
     -nombre: String
     -duracion: int
     -precio_base: double
-    +obtener_detalle(): String
     +calcular_precio(tasa_cambio: double): double
+    +obtener_detalle(): String
 }
 <<abstract>> Paquete_Turistico
 
@@ -68,22 +51,18 @@ class Servicio_Turistico {
 
 class Hotel_Estancia {
     -noches: int
-    +obtener_precio(): double
 }
 
 class Linea_Vuelo {
     -aerolinea: String
-    +obtener_precio(): double
 }
 
 class Excursion {
     -duracion_horas: int
-    +obtener_precio(): double
 }
 
 class Seguro {
     -cobertura: String
-    +obtener_precio(): double
 }
 
 class Reserva {
@@ -91,11 +70,12 @@ class Reserva {
     -fecha_reserva: Date
     -fecha_viaje: Date
     -estado: String
-    -total: double
     -tasa_cambio_aplicada: double
+    +agregar_detalle(cantidad: int): Detalle_Reserva
+    +agregar_servicio(servicio: Servicio_Turistico, cantidad: int): Detalle_Reserva
     +confirmar(): boolean
     +cancelar(): boolean
-    +validar_anticipo(): boolean
+    +validar_anticipo(monto: double): boolean
     +calcular_total(): double
 }
 
@@ -104,12 +84,6 @@ class Detalle_Reserva {
     -cantidad: int
     -subtotal: double
     +calcular_subtotal(): double
-}
-
-class Tipo_Cambio {
-    -fecha: Date
-    -valor_dolar: double
-    +obtener_valor(): double
 }
 
 class Pago {
@@ -125,50 +99,27 @@ class Boleta {
     -num_boleta: int
     -fecha: Date
     -monto: double
+    -emitida: boolean
     +emitir(): void
 }
 
-class Proveedor {
-    -id_proveedor: int
-    -nombre: String
-    +verificar_disponibilidad(fecha: Date): boolean
-}
-
-class Cupo {
-    -fecha: Date
-    -cupos_totales: int
-    -cupos_reservados: int
-    +cupos_disponibles(): int
-}
-
 Persona <|-- Cliente
-Persona <|-- Empleado
-Empleado <|-- Administrador
-Empleado <|-- Agente_Viajes
-
 Paquete_Turistico <|-- Paquete_Nacional
 Paquete_Turistico <|-- Paquete_Internacional
 Paquete_Turistico <|-- Paquete_Crucero
-
 Servicio_Turistico <|-- Hotel_Estancia
 Servicio_Turistico <|-- Linea_Vuelo
 Servicio_Turistico <|-- Excursion
 Servicio_Turistico <|-- Seguro
 
 Cliente "1" -- "0..*" Reserva : solicita
-Agente_Viajes "1" -- "0..*" Reserva : crea
 Reserva "0..*" -- "1" Paquete_Turistico : origina
 Reserva "1" *-- "0..*" Detalle_Reserva : incluye
-Detalle_Reserva "0..*" -- "1" Servicio_Turistico : refiere
+Detalle_Reserva "0..*" -- "1" Paquete_Turistico : refiere paquete
+Detalle_Reserva "0..*" -- "1" Servicio_Turistico : refiere servicio
 Reserva "1" -- "1..*" Pago : recibe
 Pago "1" *-- "1" Boleta : genera
 
-Administrador "1" -- "0..*" Proveedor : gestiona
-Administrador "1" ..> Pago : aprueba
-Proveedor "1" -- "0..*" Servicio_Turistico : provee
-Paquete_Turistico "1" -- "0..*" Cupo : disponibiliza por fecha
-Reserva "0..*" -- "1" Cupo : reserva para su fecha de viaje
-Reserva ..> Tipo_Cambio : congela la tasa obtenida al reservar
-
-note for Reserva "La reserva almacena la tasa USD/CLP aplicada. Se crea con un pago inicial pendiente del 50%; los abonos posteriores se acumulan hasta completar el saldo."
-note for Cupo "La disponibilidad se mantiene por paquete y fecha de viaje; reservar, cancelar o vencer un pago actualiza solo esa fecha."
+note for Reserva "Dominio/consola: este modelo POO se persiste con ReservaDao y lo usa main.py. La API operativa no usa estas clases; CompraService guarda en reservas/payments/package_inventory."
+note for Pago "Estados del dominio: pendiente/confirmado/fallido; la API los persiste como pending/confirmed/failed."
+note for Paquete_Internacional "pasaporte_valido es informativo; la exigencia real depende del tipo internacional y del pasaporte del cliente."

@@ -1,0 +1,23 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+explicit_package_bases = true
+mypy_path = "."
+ignore_missing_imports = true
+warn_unused_ignores = true
+files = ["model", "dao", "services", "main_api.py", "main.py", "conectar.py", "scripts"]
+
+[tool.coverage.run]
+branch = true
+source = ["model", "dao", "services", "conectar", "main_api", "main", "scripts"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

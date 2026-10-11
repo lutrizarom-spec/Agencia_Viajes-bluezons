@@ -3,8 +3,8 @@
 import sqlite3  # Inspecciona los registros conservados después de una baja lógica.
 import tempfile  # Mantiene los cambios de cada prueba fuera de la base local real.
 import unittest  # Ejecuta escenarios integrados con la biblioteca estándar.
-from datetime import date  # Da a la configuración de inventario y reservas un día explícito.
 from contextlib import closing  # Cierra conexiones SQLite de fixtures y verificaciones.
+from datetime import date  # Da a la configuración de inventario y reservas un día explícito.
 from pathlib import Path  # Construye rutas independientes del directorio actual.
 
 from fastapi.testclient import TestClient  # Invoca la API ASGI sin abrir puertos ni servicios externos.

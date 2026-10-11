@@ -7,7 +7,7 @@ import tempfile
 import threading
 import unittest
 from contextlib import closing
-from datetime import date
+from datetime import UTC, date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -152,9 +152,9 @@ class NotificationOutboxTests(unittest.TestCase):
         repository = OutboxRepository(self.database_path)
         first = repository.claim_batch(lease_seconds=1)[0]
         old_claim = first
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        later = datetime.now(timezone.utc) + timedelta(seconds=2)
+        later = datetime.now(UTC) + timedelta(seconds=2)
         second = repository.claim_batch(lease_seconds=1, now=later)[0]
         with self.assertRaises(LostOutboxClaimError):
             repository.mark_sent(old_claim, now=later)

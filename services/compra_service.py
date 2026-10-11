@@ -7,19 +7,17 @@ import math  # Valida que el precio calculado sea un número finito y positivo.
 import sqlite3  # Ejecuta el bloqueo y las escrituras transaccionales locales.
 import time  # Espera brevemente antes de reintentar una transacción bloqueada.
 import uuid  # Genera identificadores no predecibles para cada reserva.
+from collections.abc import Callable  # Tipifica el proveedor de tasa de cambio inyectado desde FxService.
 from contextlib import closing  # Garantiza el cierre de conexiones SQLite.
 from dataclasses import dataclass  # Define el resultado de compra como un valor inmutable.
-from datetime import date, datetime, timedelta, timezone  # Registra fecha de viaje y timestamps de pagos en UTC.
+from datetime import UTC, date, datetime, timedelta  # Registra fecha de viaje y timestamps de pagos en UTC.
 from decimal import Decimal
 from pathlib import Path  # Acepta rutas locales de base de datos.
-from collections.abc import Callable  # Tipifica el proveedor de tasa de cambio inyectado desde FxService.
 
 from model.cliente import pasaporte_registrado  # Reutiliza la regla de pasaporte del dominio.
-from model.paquete_crucero import Paquete_Crucero  # Reconstruye la regla existente de precio de crucero.
-from model.paquete_internacional import Paquete_Internacional  # Reconstruye la regla existente de precio internacional.
-from model.paquete_nacional import Paquete_Nacional  # Reconstruye el modelo nacional sin cambiar su fórmula.
-from model.paquete_turistico import Paquete_Turistico  # Proporciona la clase base para tipos genéricos.
 from model.money import MAX_MINOR_UNITS, from_minor_units, half_up_minor_units, to_minor_units
+from model.paquete_factory import paquete_desde_columnas  # Fuente única del mapeo tipo→modelo.
+from model.paquete_turistico import Paquete_Turistico  # Proporciona el tipo de retorno del reconstruidor.
 from services.auth_service import normalize_rut  # Almacena el mismo RUT canónico que usa el sistema de login.
 from services.notification_outbox import OutboxRepository
 
@@ -234,7 +232,7 @@ class CompraService:
                     raise IdempotencyConflictError("La clave de idempotencia ya se usó con otra solicitud.")
                 return IdempotentPurchaseResult(receipt=self._receipt_from_row(previous), replayed=True)
 
-        exchange_rate = self._get_package_exchange_rate(package_code)  # Obtiene la tasa antes del bloqueo de escritura, solo cuando el subtipo la necesita.
+        exchange_rate = self._get_package_exchange_rate(package_code)  # Se obtiene antes del BEGIN IMMEDIATE para no mantener el lock de escritura durante una llamada de red; el precio se congela al confirmar.
 
         for attempt in range(1, self._max_write_attempts + 1):  # Ejecuta el número de intentos acotado por configuración.
             try:  # Repite la transacción completa solo para bloqueos SQLite transitorios.
@@ -266,7 +264,7 @@ class CompraService:
         """Realiza una transacción de compra o lee la reserva ya confirmada."""
         reservation_id = str(uuid.uuid4())  # Genera un UUID distinto para una nueva compra; no se usa al reproducir.
         payment_id = str(uuid.uuid4())  # Crea el identificador del registro de pago simulado asociado a la reserva.
-        created_datetime = datetime.now(timezone.utc)  # Toma una sola hora base para evitar pequeñas diferencias entre campos.
+        created_datetime = datetime.now(UTC)  # Toma una sola hora base para evitar pequeñas diferencias entre campos.
         created_at = created_datetime.isoformat()  # Registra creación en UTC para la nueva reserva.
         expires_at = (created_datetime + timedelta(seconds=PAYMENT_PENDING_TTL_SECONDS)).isoformat()  # Define el plazo máximo para resolver el pago.
         with closing(self._connect()) as connection:  # Abre una conexión nueva por intento para no reutilizar una transacción abortada.
@@ -637,7 +635,7 @@ class CompraService:
                         "La reserva tiene pagos confirmados; no se puede cancelar sin un flujo de reembolso."
                     )
 
-                cancelled_at = datetime.now(timezone.utc).isoformat()  # Registra el instante UTC en que el estado cambia.
+                cancelled_at = datetime.now(UTC).isoformat()  # Registra el instante UTC en que el estado cambia.
                 changed = connection.execute(  # Cambia el estado con condición para garantizar una transición única.
                     """
                     UPDATE reservas
@@ -759,7 +757,7 @@ class CompraService:
             if normalized_key is not None
             else None
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = (now + timedelta(seconds=PAYMENT_PENDING_TTL_SECONDS)).isoformat()
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -843,10 +841,10 @@ class CompraService:
 
     def expire_pending_payments(self, *, now: datetime | None = None) -> int:
         """Marca vencidos pagos pendientes y libera sus reservas en una transacción."""
-        current_time = now or datetime.now(timezone.utc)  # Permite controlar el reloj en pruebas y usa UTC en la ejecución normal.
+        current_time = now or datetime.now(UTC)  # Permite controlar el reloj en pruebas y usa UTC en la ejecución normal.
         if current_time.tzinfo is None or current_time.utcoffset() is None:  # Exige una hora consciente de zona para comparar fechas confiablemente.
             raise ValueError("now debe incluir zona horaria.")  # Evita interpretaciones ambiguas de vencimiento.
-        current_time = current_time.astimezone(timezone.utc)  # Normaliza fechas equivalentes al formato UTC persistido.
+        current_time = current_time.astimezone(UTC)  # Normaliza fechas equivalentes al formato UTC persistido.
         current_iso = current_time.isoformat()  # Serializa una frontera estable para las consultas SQLite.
 
         for attempt in range(1, self._max_write_attempts + 1):  # Aplica reintentos breves ante contención con compras/confirmaciones.
@@ -989,7 +987,7 @@ class CompraService:
                 if row[3] == target_status and row[10] is None:  # Repetir el mismo resultado no vencido es seguro ante reintentos de red.
                     connection.commit()  # Finaliza la lectura transaccional sin volver a modificar inventario.
                     return self._payment_from_row((*row[:6], row[9]))  # Reproduce el mismo pago terminal.
-                if row[3] == "pending" and row[9] <= datetime.now(timezone.utc).isoformat():  # Cierra la carrera en que vence tras el barrido previo.
+                if row[3] == "pending" and row[9] <= datetime.now(UTC).isoformat():  # Cierra la carrera en que vence tras el barrido previo.
                     raise PaymentTransitionConflictError("El plazo de pago venció y no se puede resolver manualmente.")  # El siguiente barrido libera sus cupos.
                 if row[3] != "pending":  # Confirmado y fallido son estados terminales del flujo local.
                     raise PaymentTransitionConflictError("El pago ya fue resuelto y no admite otra transición.")  # Evita confirmar pagos fallidos o fallar pagos confirmados.
@@ -998,7 +996,7 @@ class CompraService:
                 if target_status == "confirmed" and int(row[12]) + int(row[2]) > int(row[13]):
                     raise PaymentTransitionConflictError("El pago superaría el total de la reserva.")
 
-                now = datetime.now(timezone.utc).isoformat()  # Conserva la transición con fecha UTC auditable.
+                now = datetime.now(UTC).isoformat()  # Conserva la transición con fecha UTC auditable.
                 updated_payment = connection.execute(  # Cambia el estado solo si sigue pendiente.
                     """
                     UPDATE payments
@@ -1064,14 +1062,7 @@ class CompraService:
 
     def _build_package(self, row: tuple[object, ...]) -> Paquete_Turistico:
         """Reconstruye el subtipo de paquete usando las columnas almacenadas."""
-        codigo, nombre, duracion, precio_base, tipo, pasaporte, impuesto, *_ = row  # Separa las columnas del paquete y descarta el inventario unido.
-        if tipo == "internacional":  # Reconoce el modelo que conserva el dato de pasaporte.
-            return Paquete_Internacional(codigo, nombre, duracion, precio_base, bool(pasaporte))  # Aplica la fórmula internacional original sin modificaciones.
-        if tipo == "crucero":  # Reconoce el subtipo con impuesto portuario.
-            return Paquete_Crucero(codigo, nombre, duracion, precio_base, impuesto)  # Preserva la fórmula de crucero existente.
-        if tipo == "nacional":  # Reconoce el paquete nacional que no aplica multiplicador.
-            return Paquete_Nacional(codigo, nombre, duracion, precio_base)  # Retorna el modelo nacional con su cálculo actual.
-        return Paquete_Turistico(codigo, nombre, duracion, precio_base)  # Usa comportamiento base para paquetes genéricos antiguos.
+        return paquete_desde_columnas(row[0], row[1], row[2], row[3], row[4], row[5], row[6])  # Ignora las columnas de inventario unidas.
 
     def _connect(self) -> sqlite3.Connection:
         """Abre SQLite con espera breve para activar los reintentos del servicio."""
@@ -1260,9 +1251,12 @@ class CompraService:
                 unique_reservation_index = False
                 for index in connection.execute("PRAGMA index_list(payments)").fetchall():
                     if index[2]:
+                        index_name = str(index[1])
+                        if not index_name or not index_name.replace("_", "").isalnum():
+                            raise ValueError(f"Nombre de índice inesperado en payments: {index_name!r}")
                         indexed_columns = [
                             column[2]
-                            for column in connection.execute(f"PRAGMA index_info('{index[1]}')").fetchall()
+                            for column in connection.execute(f"PRAGMA index_info('{index_name}')").fetchall()
                         ]
                         if indexed_columns == ["reservation_id"]:
                             unique_reservation_index = True

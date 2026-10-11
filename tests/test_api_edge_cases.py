@@ -1,12 +1,12 @@
 """Casos límite de autenticación, idempotencia y persistencia transaccional."""
 
+import concurrent.futures  # Compite varias solicitudes idempotentes sobre la misma clave.
 import sqlite3  # Cuenta reservas y verifica que el reintento no descuente de nuevo.
 import tempfile  # Usa una base desechable sin modificar los datos locales reales.
 import time  # Espera brevemente para verificar el worker periódico de FastAPI.
 import unittest  # Ejecuta pruebas de integración con aserciones estándar.
-import concurrent.futures  # Compite varias solicitudes idempotentes sobre la misma clave.
 from contextlib import closing  # Cierra conexiones para permitir eliminar la base en Windows.
-from datetime import date, datetime, timedelta, timezone  # Construye fecha de viaje y claims JWT de prueba.
+from datetime import UTC, date, datetime, timedelta  # Construye fecha de viaje y claims JWT de prueba.
 from pathlib import Path  # Construye rutas para la base temporal.
 from unittest.mock import patch  # Simula bloqueo SQLite y controla pausas de retry.
 
@@ -18,9 +18,9 @@ from main_api import create_app  # Construye la API y los servicios locales para
 from model.paquete_nacional import Paquete_Nacional  # Usa precio determinista sin modificar fórmulas.
 from services.auth_service import UserRole  # Crea cuentas cliente/admin con roles reales.
 from services.compra_service import (  # Accede a la compra y a los errores transitorios de SQLite.
+    PAYMENT_PENDING_TTL_SECONDS,
     CompraService,
     DatabaseBusyError,
-    PAYMENT_PENDING_TTL_SECONDS,
     PaymentTransitionConflictError,
     PurchasePersistenceError,
 )
@@ -77,7 +77,7 @@ class ApiEdgeCaseTests(unittest.TestCase):
 
     def test_expired_jwt_is_rejected_by_reservation_route(self) -> None:
         """Un JWT firmado correctamente pero vencido no autoriza una compra."""
-        issued_at = datetime.now(timezone.utc) - timedelta(hours=2)  # Sitúa la emisión antes de la fecha actual.
+        issued_at = datetime.now(UTC) - timedelta(hours=2)  # Sitúa la emisión antes de la fecha actual.
         expired_token = jwt.encode(  # Firma el token con el secreto válido para aislar específicamente la expiración.
             {
                 "sub": "10000013-K",  # Incluye el RUT normalizado de una cuenta válida.

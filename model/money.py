@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 CENT = Decimal("0.01")
 MAX_MINOR_UNITS = 2**63 - 1
@@ -16,7 +16,7 @@ def to_minor_units(value: int | float | Decimal) -> int:
         amount = Decimal(str(value))
         if not amount.is_finite() or amount < 0:
             raise ValueError("El importe debe ser finito y no negativo.")
-        minor_units = int((amount.quantize(CENT, rounding=ROUND_HALF_UP) * 100))
+        minor_units = int(amount.quantize(CENT, rounding=ROUND_HALF_UP) * 100)
     except InvalidOperation as error:
         raise ValueError("El importe no admite la precisión monetaria requerida.") from error
     if amount > 0 and minor_units == 0:

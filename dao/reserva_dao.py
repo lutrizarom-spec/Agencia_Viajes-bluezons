@@ -17,9 +17,7 @@ from model.detalle_reserva import Detalle_Reserva
 from model.excursion import Excursion
 from model.hotel_estancia import Hotel_Estancia
 from model.linea_vuelo import Linea_Vuelo
-from model.paquete_crucero import Paquete_Crucero
-from model.paquete_internacional import Paquete_Internacional
-from model.paquete_nacional import Paquete_Nacional
+from model.paquete_factory import paquete_desde_columnas
 from model.paquete_turistico import Paquete_Turistico
 from model.reserva import Reserva
 from model.seguro import Seguro
@@ -397,12 +395,6 @@ class ReservaDao(Dao):
         pasaporte: object,
         impuesto: object,
     ) -> Paquete_Turistico:
-        if tipo == "internacional":
-            return Paquete_Internacional(
-                codigo, nombre, duracion, precio_base, bool(pasaporte)
-            )
-        if tipo == "crucero":
-            return Paquete_Crucero(codigo, nombre, duracion, precio_base, impuesto)
-        if tipo == "nacional":
-            return Paquete_Nacional(codigo, nombre, duracion, precio_base)
-        return Paquete_Turistico(codigo, nombre, duracion, precio_base)
+        return paquete_desde_columnas(
+            codigo, nombre, duracion, precio_base, tipo, pasaporte, impuesto
+        )  # Fuente única del mapeo tipo→modelo.

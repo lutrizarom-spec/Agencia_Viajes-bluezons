@@ -68,7 +68,7 @@ class PackageModelInvariantTests(unittest.TestCase):
         for invalid_rate in (0, -1, math.nan, math.inf, True, "900"):  # No acepta tasas nulas, negativas, no finitas ni tipos incorrectos.
             with self.subTest(rate=invalid_rate):
                 with self.assertRaises(ValueError):
-                    getattr(package, "calcular_precio")(invalid_rate)
+                    package.calcular_precio(invalid_rate)
 
     def test_cruise_uses_supplied_exchange_rate_and_keeps_port_tax(self) -> None:
         """La cotización recibida reemplaza el multiplicador fijo durante una reserva."""

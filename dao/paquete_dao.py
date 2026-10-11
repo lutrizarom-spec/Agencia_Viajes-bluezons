@@ -1,8 +1,14 @@
 from dao.dao import Dao  # Importa la clase base que proporciona la conexión y el cursor reutilizable.
 from model.paquete_crucero import Paquete_Crucero  # Importa el modelo de crucero para reconocer su impuesto específico.
-from model.paquete_internacional import Paquete_Internacional  # Importa el modelo internacional para reconocer su dato de pasaporte.
-from model.paquete_nacional import Paquete_Nacional  # Importa el modelo nacional para clasificar sus instancias al guardarlas.
-from model.paquete_turistico import Paquete_Turistico  # Importa el modelo padre usado como tipo de entrada para los paquetes.
+from model.paquete_internacional import (
+    Paquete_Internacional,  # Importa el modelo internacional para reconocer su dato de pasaporte.
+)
+from model.paquete_nacional import (
+    Paquete_Nacional,  # Importa el modelo nacional para clasificar sus instancias al guardarlas.
+)
+from model.paquete_turistico import (
+    Paquete_Turistico,  # Importa el modelo padre usado como tipo de entrada para los paquetes.
+)
 
 
 class PaqueteDao(Dao):  # Define el acceso a datos de paquetes y hereda la conexión y el cursor comunes.

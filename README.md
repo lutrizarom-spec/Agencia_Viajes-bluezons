@@ -329,6 +329,8 @@ Instala las dependencias de ejecución y desarrollo con:
 python -m pip install -r requirements.txt -r requirements-dev.txt
 ```
 
+Nota de entorno: si `pip` falla al descargar por TLS, comprueba que las variables `SSL_CERT_FILE` y `REQUESTS_CA_BUNDLE` no apunten a un certificado inexistente o inválido; es una incidencia del entorno local, ajena al código del proyecto.
+
 Ejecuta toda la suite desde la raíz con cualquiera de estos comandos:
 
 ```powershell
@@ -338,6 +340,16 @@ pytest
 
 `pytest.ini` configura la ruta raíz para ambos comandos. GitHub Actions ejecuta
 la misma suite al subir cambios a `main` y en cada pull request.
+
+Calidad y cobertura (instaladas en `requirements-dev.txt`):
+
+```powershell
+python -m ruff check .
+python -m mypy          # informativo: aún no bloquea CI
+python -m pytest --cov --cov-report=term
+```
+
+`ruff` y la cobertura bloquean el CI; `mypy` se ejecuta como paso no bloqueante mientras se paga la deuda de tipado.
 
 ### Copias de seguridad y recuperación local
 

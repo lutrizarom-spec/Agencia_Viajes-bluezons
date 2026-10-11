@@ -4,23 +4,44 @@ import asyncio  # Ejecuta limpieza periódica en el ciclo asíncrono sin bloquea
 import logging  # Registra fallos del worker de expiración en vez de ocultarlos.
 import os  # Lee configuración local del entorno sin almacenar secretos en el repositorio.
 import sqlite3  # Inicializa el esquema del catálogo en el archivo SQLite configurado.
-from decimal import Decimal
-from contextlib import asynccontextmanager, closing  # Administra vida de app y cierra conexiones SQLite.
 from collections.abc import Callable  # Tipifica el proveedor FX inyectable sin acoplar la API a una implementación.
+from contextlib import asynccontextmanager, closing  # Administra vida de app y cierra conexiones SQLite.
 from datetime import date  # Valida y transporta la fecha solicitada para el viaje.
+from decimal import Decimal
 from pathlib import Path  # Resuelve rutas de base locales de manera independiente del directorio actual.
 from typing import Annotated, Literal  # Expresa dependencias, validaciones y estados admitidos del flujo de pago.
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Path as PathParameter, Query, Response, status  # Define rutas, headers HTTP, respuestas y errores.
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer  # Extrae el token Bearer enviado por Authorization.
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator  # Valida cuerpos JSON y documenta esquemas OpenAPI.
+from fastapi import (  # Define rutas, headers HTTP, respuestas y errores.
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+    status,
+)
+from fastapi import Path as PathParameter
+from fastapi.security import (  # Extrae el token Bearer enviado por Authorization.
+    HTTPAuthorizationCredentials,
+    HTTPBearer,
+)
+from pydantic import (  # Valida cuerpos JSON y documenta esquemas OpenAPI.
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    model_validator,
+)
 
 from dao.paquete_dao import PaqueteDao  # Reutiliza la lectura del catálogo ya implementada.
+from model.money import from_minor_units, to_minor_units
 from model.paquete_crucero import Paquete_Crucero  # Calcula precio del subtipo crucero mediante su modelo existente.
-from model.paquete_internacional import Paquete_Internacional  # Calcula precio internacional mediante su modelo existente.
+from model.paquete_factory import paquete_desde_columnas
+from model.paquete_internacional import (
+    Paquete_Internacional,  # Calcula precio internacional mediante su modelo existente.
+)
 from model.paquete_nacional import Paquete_Nacional  # Calcula precio nacional mediante su modelo existente.
 from model.paquete_turistico import Paquete_Turistico  # Proporciona precio base para filas genéricas antiguas.
-from model.money import from_minor_units, to_minor_units
 from services.auth_service import (  # Importa autenticación, normalización y errores de credenciales.
     AuthService,
     InvalidCredentialsError,
@@ -30,6 +51,7 @@ from services.auth_service import (  # Importa autenticación, normalización y 
     normalize_rut,
 )
 from services.compra_service import (  # Importa compra transaccional y errores de inventario.
+    SQLITE_INTEGER_MAX,
     CapacityBelowReservedError,
     CompraService,
     DatabaseBusyError,
@@ -42,14 +64,12 @@ from services.compra_service import (  # Importa compra transaccional y errores 
     PaymentTransitionConflictError,
     PurchasePersistenceError,
     ReservationNotFoundError,
-    SQLITE_INTEGER_MAX,
 )
 from services.fx_service import (  # Inyecta proveedor externo y traduce falta de cotización.
     FxService,
     FxServiceError,
     mindicador_usd_clp_provider,
 )
-from services.rate_limiter import RateLimiter  # Aplica límites locales persistidos a las rutas sensibles.
 from services.notification_outbox import (
     Mailer,
     OutboxEventNotFoundError,
@@ -57,6 +77,7 @@ from services.notification_outbox import (
     OutboxWorker,
     SmtpMailer,
 )
+from services.rate_limiter import RateLimiter  # Aplica límites locales persistidos a las rutas sensibles.
 
 PAYMENT_EXPIRY_SWEEP_SECONDS = 30  # Limita a treinta segundos la demora adicional para liberar un pago vencido.
 NOTIFICATION_OUTBOX_POLL_SECONDS = 2
@@ -225,14 +246,7 @@ class ExchangeRateResponse(BaseModel):
 
 def _build_package(row: tuple[object, ...]) -> Paquete_Turistico:
     """Reconstruye un modelo para conservar las fórmulas de precio actuales."""
-    codigo, nombre, duracion, precio_base, tipo, pasaporte, impuesto = row  # Separa las siete columnas entregadas por PaqueteDao.
-    if tipo == "internacional":  # Reconoce el subtipo que contiene el estado del pasaporte.
-        return Paquete_Internacional(codigo, nombre, duracion, precio_base, bool(pasaporte))  # Delega el cálculo a la fórmula internacional ya existente.
-    if tipo == "crucero":  # Reconoce el subtipo que agrega impuesto portuario.
-        return Paquete_Crucero(codigo, nombre, duracion, precio_base, impuesto)  # Delega el cálculo al modelo crucero existente.
-    if tipo == "nacional":  # Reconoce el subtipo nacional sin multiplicador FX.
-        return Paquete_Nacional(codigo, nombre, duracion, precio_base)  # Conserva el cálculo del modelo nacional.
-    return Paquete_Turistico(codigo, nombre, duracion, precio_base)  # Presenta paquetes genéricos sin inventar atributos particulares.
+    return paquete_desde_columnas(*row[:7])  # Fuente única del mapeo tipo→modelo.
 
 
 def _new_package(codigo: int, payload: PackageFields) -> Paquete_Turistico:
