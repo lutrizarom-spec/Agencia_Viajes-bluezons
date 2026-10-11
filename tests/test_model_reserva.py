@@ -144,7 +144,7 @@ class ReservationModelTests(unittest.TestCase):
         )
         payment.procesar_pago()
 
-        self.assertEqual(payment.estado, "procesado")
+        self.assertEqual(payment.estado, "confirmado")
         self.assertEqual(payment.boleta.num_boleta, 9301)
         self.assertTrue(payment.boleta.emitida)
 

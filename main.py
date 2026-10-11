@@ -354,7 +354,7 @@ def demostracion_modelo() -> None:
     )
     pago.procesar_pago()
     print(
-        f"Pago procesado: {pago.id_pago} | "
+        f"Pago confirmado: {pago.id_pago} | "
         f"${formatear_monto(pago.monto)} CLP | "
         f"estado: {pago.estado}"
     )

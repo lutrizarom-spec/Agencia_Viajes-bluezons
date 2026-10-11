@@ -10,6 +10,21 @@ Aplicación de consola de una agencia de viajes. `main.py` presenta un menú int
 - **Persistencia:** `Dao` comparte la conexión y el cursor; `PaqueteDao` implementa las operaciones de almacenamiento para paquetes.
 - **Base de datos:** `conectar.py` abre la base SQLite y activa `PRAGMA foreign_keys = ON` en la conexión.
 
+### Frontera entre dominio/consola y API
+
+El proyecto mantiene dos capas de reservas con responsabilidades distintas:
+
+- **Dominio/consola:** las clases `Reserva`, `Detalle_Reserva`, `Pago` y `Boleta` (`model/`) y su persistencia `ReservaDao` (`reservas_modelo`, `detalle_reserva`, `servicios`). Las usa el menú `main.py` y las pruebas de modelo. La API no las utiliza.
+- **API operativa:** `CompraService` persiste en `reservas`, `payments` y `package_inventory` con transacciones, idempotencia y control de inventario. Comparte las fórmulas de precio y la regla de pasaporte del dominio, pero no `ReservaDao`.
+
+Ambas capas usan los mismos tres estados de pago; el dominio los expresa en español y la API los persiste y expone en inglés:
+
+| Estado del dominio (`Pago.estado`) | Estado persistido/API |
+|---|---|
+| `pendiente` | `pending` |
+| `confirmado` | `confirmed` |
+| `fallido` | `failed` |
+
 ## Características principales
 
 - Crear la tabla de paquetes si todavía no existe.

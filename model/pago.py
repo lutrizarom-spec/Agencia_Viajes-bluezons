@@ -1,4 +1,10 @@
-"""Pago asociado a una reserva y compuesto por su boleta."""
+"""Pago asociado a una reserva y compuesto por su boleta.
+
+Estados del dominio y su equivalencia persistida por la API:
+``pendiente`` → ``pending``, ``confirmado`` → ``confirmed``,
+``fallido`` → ``failed``. La API no usa esta clase; su estado se guarda en
+``payments`` a través de ``CompraService``.
+"""
 
 from __future__ import annotations
 
@@ -64,8 +70,8 @@ class Pago:
     def estado(self, valor: str) -> None:
         if not isinstance(valor, str) or valor not in {
             "pendiente",
-            "procesado",
-            "rechazado",
+            "confirmado",
+            "fallido",
         }:
             raise ValueError("El estado del pago no es válido.")
         self.__estado = valor
@@ -102,5 +108,5 @@ class Pago:
 
     def procesar_pago(self) -> None:
         self.reserva.validar_anticipo(self.monto)
-        self.estado = "procesado"
+        self.estado = "confirmado"
         self.boleta.emitir()

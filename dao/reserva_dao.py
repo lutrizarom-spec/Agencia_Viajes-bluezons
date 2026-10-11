@@ -1,4 +1,10 @@
-"""Persistencia SQLite de reservas del modelo con paquetes y servicios."""
+"""Persistencia SQLite de reservas del modelo POO con paquetes y servicios.
+
+Capa de dominio/consola: guarda ``reservas_modelo``, ``detalle_reserva`` y
+``servicios`` para el menú ``main.py`` y las pruebas del modelo. La API no usa
+este DAO; su almacenamiento operativo vive en ``CompraService``
+(``reservas``, ``payments``, ``package_inventory``).
+"""
 
 from __future__ import annotations
 
