@@ -14,6 +14,7 @@ from model.detalle_reserva_inconsistente_error import DetalleReservaInconsistent
 from model.excursion import Excursion
 from model.hotel_estancia import Hotel_Estancia
 from model.linea_vuelo import Linea_Vuelo
+from model.paquete_crucero import Paquete_Crucero
 from model.paquete_internacional import Paquete_Internacional
 from model.paquete_nacional import Paquete_Nacional
 from model.pasaporte_requerido_error import PasaporteRequeridoError
@@ -215,6 +216,268 @@ class ReservaPersistenciaTests(unittest.TestCase):
         with self.assertRaises(DetalleReservaInconsistenteError):
             ReservaDao._validar_detalles_completos("RES-701", 2, [])
         ReservaDao._validar_detalles_completos("RES-701", 0, [])
+
+    def _insertar_detalle_crudo(
+        self,
+        *,
+        id_detalle: int,
+        tipo_item: str,
+        paquete_codigo: int | None,
+        id_servicio: int | None,
+    ) -> None:
+        self.dao.guardar_reserva(_reserva_con_servicios())
+        with closing(sqlite3.connect(self.db_path)) as cruda:
+            cruda.execute(
+                """
+                INSERT INTO detalle_reserva (
+                    id_detalle, numero_reserva, orden, tipo_item,
+                    cantidad, subtotal, paquete_codigo, id_servicio
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (id_detalle, "RES-701", 99, tipo_item, 1, 100.0, paquete_codigo, id_servicio),
+            )
+            cruda.commit()
+
+    def _obtener_con_detalle_crudo(self, **kwargs: object) -> None:
+        self._insertar_detalle_crudo(**kwargs)
+        with closing(crear_conexion(self.db_path)) as otra_conexion:
+            with self.assertRaises(DetalleReservaInconsistenteError) as contexto:
+                ReservaDao(otra_conexion).obtener_reserva("RES-701")
+        mensaje = str(contexto.exception)
+        self.assertIn("RES-701", mensaje)
+        self.assertIn(str(kwargs["id_detalle"]), mensaje)
+
+    def test_tipo_item_desconocido_es_rechazado(self) -> None:
+        self._obtener_con_detalle_crudo(
+            id_detalle=90, tipo_item="basura", paquete_codigo=None, id_servicio=None
+        )
+
+    def test_servicio_sin_id_servicio_es_rechazado(self) -> None:
+        self._obtener_con_detalle_crudo(
+            id_detalle=91, tipo_item="servicio", paquete_codigo=None, id_servicio=None
+        )
+
+    def test_servicio_con_paquete_simultaneo_es_rechazado(self) -> None:
+        self._obtener_con_detalle_crudo(
+            id_detalle=92, tipo_item="servicio", paquete_codigo=701, id_servicio=1
+        )
+
+    def test_paquete_sin_codigo_es_rechazado(self) -> None:
+        self._obtener_con_detalle_crudo(
+            id_detalle=93, tipo_item="paquete", paquete_codigo=None, id_servicio=None
+        )
+
+    def test_paquete_con_servicio_simultaneo_es_rechazado(self) -> None:
+        self._obtener_con_detalle_crudo(
+            id_detalle=94, tipo_item="paquete", paquete_codigo=701, id_servicio=1
+        )
+
+    def test_paquete_con_codigo_distinto_a_la_cabecera_es_rechazado(self) -> None:
+        self._obtener_con_detalle_crudo(
+            id_detalle=95, tipo_item="paquete", paquete_codigo=999, id_servicio=None
+        )
+
+    def test_servicios_de_reserva_rechaza_servicio_sin_id(self) -> None:
+        self._insertar_detalle_crudo(
+            id_detalle=96, tipo_item="servicio", paquete_codigo=None, id_servicio=None
+        )
+        with closing(crear_conexion(self.db_path)) as otra_conexion:
+            with self.assertRaises(DetalleReservaInconsistenteError) as contexto:
+                ReservaDao(otra_conexion).obtener_servicios_de_reserva("RES-701")
+        mensaje = str(contexto.exception)
+        self.assertIn("RES-701", mensaje)
+        self.assertIn("96", mensaje)
+
+    def _leer_tras_corromper(
+        self,
+        sql: str,
+        *,
+        metodo: str = "obtener_reserva",
+        guardar: Reserva | None = None,
+    ) -> str:
+        self.dao.guardar_reserva(
+            _reserva_con_servicios() if guardar is None else guardar
+        )
+        with closing(sqlite3.connect(self.db_path)) as cruda:
+            cruda.execute(sql)
+            cruda.commit()
+        with closing(crear_conexion(self.db_path)) as otra_conexion:
+            with self.assertRaises(DetalleReservaInconsistenteError) as contexto:
+                getattr(ReservaDao(otra_conexion), metodo)("RES-701")
+        return str(contexto.exception)
+
+    def _reserva_crucero(self) -> Reserva:
+        paquete = Paquete_Crucero(701, "Crucero", 3, 50000.0, 1000.0)
+        reserva = Reserva(
+            "RES-701",
+            date(2026, 10, 6),
+            date(2026, 12, 15),
+            _cliente_con_pasaporte(),
+            paquete,
+        )
+        reserva.agregar_detalle(2)
+        return reserva
+
+    def test_cabecera_fecha_invalida(self) -> None:
+        self.assertIn(
+            "RES-701",
+            self._leer_tras_corromper(
+                "UPDATE reservas_modelo SET fecha_reserva='not-a-date'"
+            ),
+        )
+
+    def test_cabecera_cliente_id_no_numerico(self) -> None:
+        self.assertIn(
+            "RES-701",
+            self._leer_tras_corromper(
+                "UPDATE reservas_modelo SET cliente_id='abc'"
+            ),
+        )
+
+    def test_cabecera_correo_invalido(self) -> None:
+        self.assertIn(
+            "RES-701",
+            self._leer_tras_corromper(
+                "UPDATE reservas_modelo SET cliente_correo='sinarroba'"
+            ),
+        )
+
+    def test_cabecera_duracion_no_numerica(self) -> None:
+        self.assertIn(
+            "RES-701",
+            self._leer_tras_corromper(
+                "UPDATE reservas_modelo SET paquete_duracion='abc'"
+            ),
+        )
+
+    def test_cabecera_impuesto_crucero_nulo(self) -> None:
+        self.assertIn(
+            "RES-701",
+            self._leer_tras_corromper(
+                "UPDATE reservas_modelo SET paquete_impuesto=NULL",
+                guardar=self._reserva_crucero(),
+            ),
+        )
+
+    def test_detalle_id_invalido(self) -> None:
+        self.assertIn(
+            "RES-701",
+            self._leer_tras_corromper(
+                "UPDATE detalle_reserva SET id_detalle=0 WHERE id_detalle=1"
+            ),
+        )
+
+    def test_detalle_cantidad_invalida(self) -> None:
+        self.assertIn(
+            "RES-701",
+            self._leer_tras_corromper(
+                "UPDATE detalle_reserva SET cantidad=0 WHERE id_detalle=1"
+            ),
+        )
+
+    def test_detalle_subtotal_cero(self) -> None:
+        self.assertIn(
+            "RES-701",
+            self._leer_tras_corromper(
+                "UPDATE detalle_reserva SET subtotal=0 WHERE id_detalle=1"
+            ),
+        )
+
+    def test_detalle_subtotal_negativo(self) -> None:
+        self.assertIn(
+            "RES-701",
+            self._leer_tras_corromper(
+                "UPDATE detalle_reserva SET subtotal=-5 WHERE id_detalle=1"
+            ),
+        )
+
+    def test_detalle_paquete_codigo_no_numerico(self) -> None:
+        self.assertIn(
+            "RES-701",
+            self._leer_tras_corromper(
+                "UPDATE detalle_reserva SET paquete_codigo='abc' WHERE id_detalle=1"
+            ),
+        )
+
+    def test_detalle_servicio_id_no_numerico(self) -> None:
+        self.assertIn(
+            "RES-701",
+            self._leer_tras_corromper(
+                "UPDATE detalle_reserva SET id_servicio='abc' WHERE tipo_item='servicio'"
+            ),
+        )
+
+    def test_servicio_noches_nula_por_reserva(self) -> None:
+        mensaje = self._leer_tras_corromper(
+            "UPDATE servicios SET noches=NULL WHERE tipo='hotel'"
+        )
+        self.assertIn("2", mensaje)
+        self.assertIn("noches", mensaje)
+
+    def test_servicio_duracion_nula_por_reserva(self) -> None:
+        mensaje = self._leer_tras_corromper(
+            "UPDATE servicios SET duracion_horas=NULL WHERE tipo='excursion'"
+        )
+        self.assertIn("3", mensaje)
+        self.assertIn("duracion_horas", mensaje)
+
+    def test_servicio_precio_no_numerico_por_reserva(self) -> None:
+        mensaje = self._leer_tras_corromper(
+            "UPDATE servicios SET precio_base='x' WHERE tipo='vuelo'"
+        )
+        self.assertIn("1", mensaje)
+
+    def test_servicio_noches_cero_por_reserva(self) -> None:
+        mensaje = self._leer_tras_corromper(
+            "UPDATE servicios SET noches=0 WHERE tipo='hotel'"
+        )
+        self.assertIn("2", mensaje)
+        self.assertIn("noches", mensaje)
+
+    def test_servicio_duracion_cero_por_reserva(self) -> None:
+        mensaje = self._leer_tras_corromper(
+            "UPDATE servicios SET duracion_horas=0 WHERE tipo='excursion'"
+        )
+        self.assertIn("3", mensaje)
+
+    def test_servicio_noches_nula_por_servicios(self) -> None:
+        mensaje = self._leer_tras_corromper(
+            "UPDATE servicios SET noches=NULL WHERE tipo='hotel'",
+            metodo="obtener_servicios_de_reserva",
+        )
+        self.assertIn("2", mensaje)
+        self.assertIn("noches", mensaje)
+
+    def test_servicio_duracion_nula_por_servicios(self) -> None:
+        mensaje = self._leer_tras_corromper(
+            "UPDATE servicios SET duracion_horas=NULL WHERE tipo='excursion'",
+            metodo="obtener_servicios_de_reserva",
+        )
+        self.assertIn("3", mensaje)
+        self.assertIn("duracion_horas", mensaje)
+
+    def test_servicio_precio_no_numerico_por_servicios(self) -> None:
+        mensaje = self._leer_tras_corromper(
+            "UPDATE servicios SET precio_base='x' WHERE tipo='vuelo'",
+            metodo="obtener_servicios_de_reserva",
+        )
+        self.assertIn("1", mensaje)
+
+    def test_servicio_noches_cero_por_servicios(self) -> None:
+        mensaje = self._leer_tras_corromper(
+            "UPDATE servicios SET noches=0 WHERE tipo='hotel'",
+            metodo="obtener_servicios_de_reserva",
+        )
+        self.assertIn("2", mensaje)
+        self.assertIn("noches", mensaje)
+
+    def test_servicio_duracion_cero_por_servicios(self) -> None:
+        mensaje = self._leer_tras_corromper(
+            "UPDATE servicios SET duracion_horas=0 WHERE tipo='excursion'",
+            metodo="obtener_servicios_de_reserva",
+        )
+        self.assertIn("3", mensaje)
 
 
 if __name__ == "__main__":

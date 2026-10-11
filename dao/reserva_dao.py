@@ -159,16 +159,32 @@ class ReservaDao(Dao):
         """Recupera los servicios asociados a una misma reserva."""
         rows = self.cursor.execute(
             """
-            SELECT s.id_servicio, s.tipo, s.nombre, s.destino, s.zona,
+            SELECT d.id_detalle, d.tipo_item, d.id_servicio, d.paquete_codigo,
+                   s.id_servicio, s.tipo, s.nombre, s.destino, s.zona,
                    s.precio_base, s.noches, s.aerolinea, s.duracion_horas, s.cobertura
             FROM detalle_reserva AS d
-            JOIN servicios AS s ON s.id_servicio = d.id_servicio
-            WHERE d.numero_reserva = ? AND d.tipo_item = 'servicio'
+            LEFT JOIN servicios AS s ON s.id_servicio = d.id_servicio
+            WHERE d.numero_reserva = ?
             ORDER BY d.orden
             """,
             (numero_reserva,),
         ).fetchall()
-        return [self._servicio_from_row(row) for row in rows]
+        servicios: list[Servicio_Turistico] = []
+        for fila in rows:
+            id_detalle, tipo_item, id_servicio, detalle_paquete_codigo = fila[:4]
+            self._validar_estructura_detalle(
+                id_detalle, numero_reserva, tipo_item, id_servicio, detalle_paquete_codigo
+            )
+            if tipo_item != "servicio":
+                continue
+            servicio_fila = fila[4:]
+            if servicio_fila[0] is None:
+                raise DetalleReservaInconsistenteError(
+                    f"El detalle {id_detalle} de la reserva {numero_reserva} referencia "
+                    f"al servicio {id_servicio}, que no existe."
+                )
+            servicios.append(self._servicio_from_row(servicio_fila))
+        return servicios
 
     def obtener_reserva(self, numero_reserva: str) -> Reserva | None:
         """Reconstruye una reserva completa con su paquete y sus servicios."""
@@ -209,35 +225,40 @@ class ReservaDao(Dao):
             paquete_impuesto,
         ) = row
 
-        cliente = Cliente(
-            int(cliente_id),
-            cliente_rut,
-            cliente_nombre,
-            cliente_telefono,
-            cliente_pasaporte or "",
-            cliente_correo,
-        )
-        paquete = self._paquete_from_values(
-            int(paquete_codigo),
-            paquete_nombre,
-            int(paquete_duracion),
-            float(paquete_precio_base),
-            paquete_tipo,
-            paquete_pasaporte,
-            paquete_impuesto,
-        )
-        reserva = Reserva(
-            numero,
-            date.fromisoformat(fecha_reserva),
-            date.fromisoformat(fecha_viaje),
-            cliente,
-            paquete,
-            float(tasa),
-        )
+        try:
+            cliente = Cliente(
+                int(cliente_id),
+                cliente_rut,
+                cliente_nombre,
+                cliente_telefono,
+                cliente_pasaporte or "",
+                cliente_correo,
+            )
+            paquete = self._paquete_from_values(
+                int(paquete_codigo),
+                paquete_nombre,
+                int(paquete_duracion),
+                float(paquete_precio_base),
+                paquete_tipo,
+                paquete_pasaporte,
+                paquete_impuesto,
+            )
+            reserva = Reserva(
+                numero,
+                date.fromisoformat(fecha_reserva),
+                date.fromisoformat(fecha_viaje),
+                cliente,
+                paquete,
+                float(tasa),
+            )
+        except ValueError as error:
+            raise DetalleReservaInconsistenteError(
+                f"La reserva {numero_reserva} contiene datos ilegibles en su cabecera: {error}"
+            ) from error
 
         detalle_rows = self.cursor.execute(
             """
-            SELECT id_detalle, tipo_item, cantidad, subtotal, id_servicio
+            SELECT id_detalle, tipo_item, cantidad, subtotal, paquete_codigo, id_servicio
             FROM detalle_reserva
             WHERE numero_reserva = ?
             ORDER BY orden
@@ -245,26 +266,85 @@ class ReservaDao(Dao):
             (numero,),
         ).fetchall()
         detalles: list[Detalle_Reserva] = []
-        for id_detalle, tipo_item, cantidad, subtotal, id_servicio in detalle_rows:
-            referencia: Paquete_Turistico | Servicio_Turistico
-            if tipo_item == "servicio":
-                servicio = self.obtener_servicio(int(id_servicio))
-                if servicio is None:
-                    raise DetalleReservaInconsistenteError(
-                        f"El detalle {id_detalle} de la reserva {numero} referencia "
-                        f"al servicio {id_servicio}, que no existe."
-                    )
-                referencia = servicio
-            else:
-                referencia = paquete
-            detalle = Detalle_Reserva(
-                int(id_detalle), referencia, int(cantidad), float(tasa)
-            )
-            detalle._restaurar_subtotal_persistido(float(subtotal))
-            detalles.append(detalle)
+        for (
+            id_detalle,
+            tipo_item,
+            cantidad,
+            subtotal,
+            detalle_paquete_codigo,
+            id_servicio,
+        ) in detalle_rows:
+            try:
+                self._validar_estructura_detalle(
+                    id_detalle, numero, tipo_item, id_servicio, detalle_paquete_codigo
+                )
+                referencia: Paquete_Turistico | Servicio_Turistico
+                if tipo_item == "servicio":
+                    servicio = self.obtener_servicio(int(id_servicio))
+                    if servicio is None:
+                        raise DetalleReservaInconsistenteError(
+                            f"El detalle {id_detalle} de la reserva {numero} referencia "
+                            f"al servicio {id_servicio}, que no existe."
+                        )
+                    referencia = servicio
+                else:
+                    if int(detalle_paquete_codigo) != int(paquete_codigo):
+                        raise DetalleReservaInconsistenteError(
+                            f"El detalle {id_detalle} de la reserva {numero} referencia al "
+                            f"paquete {detalle_paquete_codigo}, distinto del paquete "
+                            f"{paquete_codigo} de la reserva."
+                        )
+                    referencia = paquete
+                detalle = Detalle_Reserva(
+                    int(id_detalle), referencia, int(cantidad), float(tasa)
+                )
+                detalle._restaurar_subtotal_persistido(float(subtotal))
+                detalles.append(detalle)
+            except ValueError as error:
+                raise DetalleReservaInconsistenteError(
+                    f"El detalle {id_detalle} de la reserva {numero} contiene datos "
+                    f"ilegibles: {error}"
+                ) from error
         self._validar_detalles_completos(numero, len(detalle_rows), detalles)
         reserva._restaurar_desde_persistencia(detalles, estado)
         return reserva
+
+    @staticmethod
+    def _validar_estructura_detalle(
+        id_detalle: int,
+        numero_reserva: str,
+        tipo_item: str,
+        id_servicio: int | None,
+        paquete_codigo: int | None,
+    ) -> None:
+        """Comprueba que el tipo y las referencias de un detalle sean coherentes."""
+        if tipo_item == "servicio":
+            if id_servicio is None:
+                raise DetalleReservaInconsistenteError(
+                    f"El detalle {id_detalle} de la reserva {numero_reserva} es de tipo "
+                    f"'servicio' pero no referencia ningún id_servicio."
+                )
+            if paquete_codigo is not None:
+                raise DetalleReservaInconsistenteError(
+                    f"El detalle {id_detalle} de la reserva {numero_reserva} es de tipo "
+                    f"'servicio' pero también referencia al paquete {paquete_codigo}."
+                )
+        elif tipo_item == "paquete":
+            if paquete_codigo is None:
+                raise DetalleReservaInconsistenteError(
+                    f"El detalle {id_detalle} de la reserva {numero_reserva} es de tipo "
+                    f"'paquete' pero no referencia ningún paquete_codigo."
+                )
+            if id_servicio is not None:
+                raise DetalleReservaInconsistenteError(
+                    f"El detalle {id_detalle} de la reserva {numero_reserva} es de tipo "
+                    f"'paquete' pero también referencia al servicio {id_servicio}."
+                )
+        else:
+            raise DetalleReservaInconsistenteError(
+                f"El detalle {id_detalle} de la reserva {numero_reserva} tiene un "
+                f"tipo_item no admitido: {tipo_item!r}."
+            )
 
     @staticmethod
     def _validar_detalles_completos(
@@ -384,28 +464,45 @@ class ReservaDao(Dao):
             duracion_horas,
             cobertura,
         ) = row
-        if tipo == "hotel":
-            return Hotel_Estancia(
-                int(id_servicio), nombre, destino, zona, float(precio_base), int(noches)
+        try:
+            if tipo == "hotel":
+                if noches is None:
+                    raise DetalleReservaInconsistenteError(
+                        f"El servicio {id_servicio} de tipo 'hotel' no tiene valor "
+                        f"en la columna 'noches'."
+                    )
+                return Hotel_Estancia(
+                    int(id_servicio), nombre, destino, zona, float(precio_base), int(noches)
+                )
+            if tipo == "vuelo":
+                return Linea_Vuelo(
+                    int(id_servicio), nombre, destino, zona, float(precio_base), aerolinea
+                )
+            if tipo == "excursion":
+                if duracion_horas is None:
+                    raise DetalleReservaInconsistenteError(
+                        f"El servicio {id_servicio} de tipo 'excursion' no tiene valor "
+                        f"en la columna 'duracion_horas'."
+                    )
+                return Excursion(
+                    int(id_servicio),
+                    nombre,
+                    destino,
+                    zona,
+                    float(precio_base),
+                    int(duracion_horas),
+                )
+            if tipo == "seguro":
+                return Seguro(
+                    int(id_servicio), nombre, destino, zona, float(precio_base), cobertura
+                )
+            return Servicio_Turistico(
+                int(id_servicio), nombre, destino, zona, float(precio_base)
             )
-        if tipo == "vuelo":
-            return Linea_Vuelo(
-                int(id_servicio), nombre, destino, zona, float(precio_base), aerolinea
-            )
-        if tipo == "excursion":
-            return Excursion(
-                int(id_servicio),
-                nombre,
-                destino,
-                zona,
-                float(precio_base),
-                int(duracion_horas),
-            )
-        if tipo == "seguro":
-            return Seguro(
-                int(id_servicio), nombre, destino, zona, float(precio_base), cobertura
-            )
-        return Servicio_Turistico(int(id_servicio), nombre, destino, zona, float(precio_base))
+        except ValueError as error:
+            raise DetalleReservaInconsistenteError(
+                f"El servicio {id_servicio} tiene datos ilegibles: {error}"
+            ) from error
 
     @staticmethod
     def _paquete_from_values(
