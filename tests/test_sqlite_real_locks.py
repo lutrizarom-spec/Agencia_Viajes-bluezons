@@ -13,6 +13,7 @@ import unittest  # Ejecuta las aserciones del contrato de persistencia y HTTP.
 from contextlib import closing  # Cierra conexiones de inspeccion y permite borrar la base temporal.
 from datetime import date  # Fija la fecha de viaje usada por el inventario.
 from pathlib import Path  # Construye rutas portables dentro de la carpeta temporal.
+from typing import cast  # Recupera el tipo float del tiempo medido dentro del hilo.
 from unittest.mock import patch  # Aisla solo la lectura previa de catalogo para alcanzar la lectura de cupos.
 
 from fastapi.testclient import TestClient  # Ejecuta los endpoints reales dentro del proceso.
@@ -84,7 +85,7 @@ class RealWriteLockServiceTests(unittest.TestCase):
         self.assertNotIn("error", outcome, f"la operacion fallo: {outcome.get('error')!r}")  # Exige exito.
         self.assertEqual(5, outcome["available"])  # La capacidad configurada coincide con la solicitada.
         self.assertGreaterEqual(  # Confirma que hubo contencion real antes de la liberacion.
-            outcome["elapsed"], 0.2, "no se observo espera por el lock real"
+            cast(float, outcome["elapsed"]), 0.2, "no se observo espera por el lock real"
         )
         self.assertEqual(5, service.get_available_capacity(101, TRAVEL_DATE))  # El estado final es consistente.
 
@@ -161,7 +162,7 @@ class AvailableCapacityLockTests(unittest.TestCase):
 
         self.assertNotIn("error", outcome, f"la lectura fallo: {outcome.get('error')!r}")  # Exige exito tras liberar.
         self.assertEqual(4, outcome["available"])  # Devuelve la capacidad real configurada.
-        self.assertGreaterEqual(outcome["elapsed"], 0.5, "no se observo espera por el lock real")  # Evidencia de contencion.
+        self.assertGreaterEqual(cast(float, outcome["elapsed"]), 0.5, "no se observo espera por el lock real")  # Evidencia de contencion.
 
     def test_available_capacity_exhausted_lock_raises_domain_error(self) -> None:
         """Un lock exclusivo persistente agota los reintentos y produce DatabaseBusyError."""

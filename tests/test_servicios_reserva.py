@@ -6,6 +6,7 @@ import unittest
 from contextlib import closing
 from datetime import date
 from pathlib import Path
+from typing import cast
 
 from conectar import crear_conexion
 from dao.reserva_dao import ReservaDao
@@ -20,7 +21,6 @@ from model.paquete_nacional import Paquete_Nacional
 from model.pasaporte_requerido_error import PasaporteRequeridoError
 from model.reserva import Reserva
 from model.seguro import Seguro
-from model.servicio_turistico import Servicio_Turistico
 
 
 def _cliente_con_pasaporte() -> Cliente:
@@ -29,13 +29,13 @@ def _cliente_con_pasaporte() -> Cliente:
     )
 
 
-def _servicios() -> list[Servicio_Turistico]:
-    return [
+def _servicios() -> tuple[Linea_Vuelo, Hotel_Estancia, Excursion, Seguro]:
+    return (
         Linea_Vuelo(1, "Vuelo SCL-LIM", "Lima", "Sudamérica", 120000.0, "LATAM"),
         Hotel_Estancia(2, "Hotel Miraflores", "Lima", "Sudamérica", 80000.0, 3),
         Excursion(3, "City tour", "Lima", "Sudamérica", 30000.0, 4),
         Seguro(4, "Seguro viaje", "Lima", "Sudamérica", 15000.0, "cobertura total"),
-    ]
+    )
 
 
 def _reserva_con_servicios() -> Reserva:
@@ -133,6 +133,7 @@ class ReservaPersistenciaTests(unittest.TestCase):
             servicios = dao_nuevo.obtener_servicios_de_reserva("RES-701")
 
         self.assertIsNotNone(recuperada)
+        assert recuperada is not None
         self.assertEqual(len(recuperada.servicios), 4)
         self.assertEqual(len(servicios), 4)
         self.assertEqual(recuperada.total, total_original)
@@ -141,12 +142,23 @@ class ReservaPersistenciaTests(unittest.TestCase):
             {Linea_Vuelo, Hotel_Estancia, Excursion, Seguro},
         )
         recuperados = {type(s): s for s in recuperada.servicios}
-        self.assertEqual(recuperados[Linea_Vuelo].aerolinea, "LATAM")
-        self.assertEqual(recuperados[Hotel_Estancia].noches, 3)
-        self.assertEqual(recuperados[Excursion].duracion_horas, 4)
-        self.assertEqual(recuperados[Seguro].cobertura, "cobertura total")
+        vuelo = recuperados[Linea_Vuelo]
+        assert isinstance(vuelo, Linea_Vuelo)
+        self.assertEqual(vuelo.aerolinea, "LATAM")
+        hotel = recuperados[Hotel_Estancia]
+        assert isinstance(hotel, Hotel_Estancia)
+        self.assertEqual(hotel.noches, 3)
+        excursion = recuperados[Excursion]
+        assert isinstance(excursion, Excursion)
+        self.assertEqual(excursion.duracion_horas, 4)
+        seguro = recuperados[Seguro]
+        assert isinstance(seguro, Seguro)
+        self.assertEqual(seguro.cobertura, "cobertura total")
         self.assertEqual(recuperada.numero_reserva, "RES-701")
-        self.assertEqual(recuperada.detalles[0].paquete.codigo, 701)
+        detalle_paquete = recuperada.detalles[0].paquete
+        self.assertIsNotNone(detalle_paquete)
+        assert detalle_paquete is not None
+        self.assertEqual(detalle_paquete.codigo, 701)
 
     def test_guardar_dos_veces_no_duplica_los_detalles(self) -> None:
         original = _reserva_con_servicios()
@@ -178,7 +190,7 @@ class ReservaPersistenciaTests(unittest.TestCase):
             def __getattr__(self, nombre: str) -> object:
                 return getattr(self._cursor, nombre)
 
-        self.dao.cursor = _CursorQueFalla(original)
+        self.dao.cursor = cast(sqlite3.Cursor, _CursorQueFalla(original))
         self.addCleanup(setattr, self.dao, "cursor", original)
         return original
 
@@ -224,6 +236,7 @@ class ReservaPersistenciaTests(unittest.TestCase):
             recuperada = ReservaDao(otra_conexion).obtener_reserva("RES-701")
 
         self.assertIsNotNone(recuperada)
+        assert recuperada is not None
         self.assertEqual(recuperada.numero_reserva, "RES-701")
         self.assertEqual(len(recuperada.detalles), 5)
         self.assertEqual(len(recuperada.servicios), 4)
@@ -237,6 +250,7 @@ class ReservaPersistenciaTests(unittest.TestCase):
             recuperada = ReservaDao(otra_conexion).obtener_reserva("RES-701")
 
         self.assertIsNotNone(recuperada)
+        assert recuperada is not None
         self.assertEqual(recuperada.estado, "confirmada")
         self.assertEqual(len(recuperada.detalles), 5)
         self.assertEqual(recuperada.total, reserva.total)
@@ -251,6 +265,7 @@ class ReservaPersistenciaTests(unittest.TestCase):
             recuperada = ReservaDao(otra_conexion).obtener_reserva("RES-701")
 
         self.assertIsNotNone(recuperada)
+        assert recuperada is not None
         self.assertEqual(recuperada.estado, "cancelada")
         self.assertEqual(len(recuperada.detalles), 5)
 
@@ -269,6 +284,7 @@ class ReservaPersistenciaTests(unittest.TestCase):
             recuperada = ReservaDao(otra_conexion).obtener_reserva("RES-702")
 
         self.assertIsNotNone(recuperada)
+        assert recuperada is not None
         self.assertEqual(recuperada.numero_reserva, "RES-702")
         self.assertEqual(recuperada.estado, "pendiente")
         self.assertEqual(len(recuperada.detalles), 0)
@@ -283,6 +299,7 @@ class ReservaPersistenciaTests(unittest.TestCase):
         with closing(crear_conexion(self.db_path)) as otra_conexion:
             recuperado = ReservaDao(otra_conexion).obtener_servicio(20)
         self.assertIsInstance(recuperado, Hotel_Estancia)
+        assert isinstance(recuperado, Hotel_Estancia)
         self.assertEqual(recuperado.noches, 2)
 
     def test_total_no_cambia_al_modificar_el_precio_del_servicio(self) -> None:
@@ -298,6 +315,7 @@ class ReservaPersistenciaTests(unittest.TestCase):
             recuperada = ReservaDao(otra_conexion).obtener_reserva("RES-701")
 
         self.assertIsNotNone(recuperada)
+        assert recuperada is not None
         self.assertEqual(recuperada.total, total_original)
 
     def test_servicio_referenciado_inexistente_lanza_error(self) -> None:
@@ -352,14 +370,26 @@ class ReservaPersistenciaTests(unittest.TestCase):
             )
             cruda.commit()
 
-    def _obtener_con_detalle_crudo(self, **kwargs: object) -> None:
-        self._insertar_detalle_crudo(**kwargs)
+    def _obtener_con_detalle_crudo(
+        self,
+        *,
+        id_detalle: int,
+        tipo_item: str,
+        paquete_codigo: int | None,
+        id_servicio: int | None,
+    ) -> None:
+        self._insertar_detalle_crudo(
+            id_detalle=id_detalle,
+            tipo_item=tipo_item,
+            paquete_codigo=paquete_codigo,
+            id_servicio=id_servicio,
+        )
         with closing(crear_conexion(self.db_path)) as otra_conexion:
             with self.assertRaises(DetalleReservaInconsistenteError) as contexto:
                 ReservaDao(otra_conexion).obtener_reserva("RES-701")
         mensaje = str(contexto.exception)
         self.assertIn("RES-701", mensaje)
-        self.assertIn(str(kwargs["id_detalle"]), mensaje)
+        self.assertIn(str(id_detalle), mensaje)
 
     def test_tipo_item_desconocido_es_rechazado(self) -> None:
         self._obtener_con_detalle_crudo(

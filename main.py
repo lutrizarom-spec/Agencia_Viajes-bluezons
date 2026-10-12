@@ -223,20 +223,25 @@ def eliminar_paquete(dao: PaqueteDao, leer, mostrar) -> None:
     mostrar("  Paquete dado de baja correctamente.")
 
 
-def _tasa_usd_clp(db_path: str | None) -> float | None:
-    """Obtiene la tasa USD/CLP del servicio FX; informa y retorna None si no hay tasa."""
+TASA_DEMOSTRACION_USD_CLP = 900.0  # Dato solo para la demostración académica; no es una cotización vigente.
+
+
+def _tasa_usd_clp(db_path: str | None) -> tuple[float, bool]:
+    """Devuelve (tasa, es_real) para la demostración del modelo.
+
+    Usa la cotización vigente del servicio FX cuando está disponible; si no,
+    recurre a TASA_DEMOSTRACION_USD_CLP, un dato de prueba explícito que nunca
+    se presenta como una cotización real.
+    """
     servicio = FxService(
         resolver_ruta_base_datos(db_path),
         mindicador_usd_clp_provider,
     )
     try:
-        return servicio.get_usd_clp_rate()
+        return servicio.get_usd_clp_rate(), True
     except FxServiceError as error:
-        print(
-            "  Nota: no se pudo obtener la tasa USD/CLP "
-            f"({error}). Se omitirán los precios de paquetes internacionales y cruceros."
-        )
-        return None
+        print(f"  Nota: no se pudo obtener la tasa USD/CLP real ({error}).")
+        return TASA_DEMOSTRACION_USD_CLP, False
 
 
 def demostracion_modelo(db_path: str | None = None) -> None:
@@ -248,7 +253,18 @@ def demostracion_modelo(db_path: str | None = None) -> None:
     ]
 
     print("=== Paquetes: herencia y cálculo polimórfico ===")
-    tasa_usd_clp = _tasa_usd_clp(db_path)
+    tasa_usd_clp, es_cotizacion_real = _tasa_usd_clp(db_path)
+    if es_cotizacion_real:
+        print(
+            "  Tasa USD/CLP usada en la demostración: "
+            f"{formatear_monto(tasa_usd_clp)} CLP/USD (cotización vigente del servicio FX)."
+        )
+    else:
+        print(
+            "  Se usará una tasa de demostración de "
+            f"{formatear_monto(TASA_DEMOSTRACION_USD_CLP)} CLP/USD; "
+            "no es una cotización vigente, solo un dato para esta demostración académica."
+        )
     reglas_precio = {
         Paquete_Nacional: ("CLP", "precio base sin conversión"),
         Paquete_Internacional: ("USD", "precio base × tasa USD/CLP"),
@@ -262,14 +278,6 @@ def demostracion_modelo(db_path: str | None = None) -> None:
                 f" + impuesto portuario de "
                 f"${formatear_monto(paquete.impuesto_puerto)}"
             )
-        if es_extranjero and tasa_usd_clp is None:
-            print(
-                f"{type(paquete).__name__}: {paquete.nombre} | "
-                f"Precio base: ${formatear_monto(paquete.precio_base)} {moneda_base} | "
-                f"Regla aplicada: {regla} | "
-                "Precio calculado: omitido (sin tasa USD/CLP disponible)"
-            )
-            continue
         tasa = tasa_usd_clp if es_extranjero else None
         print(
             f"{type(paquete).__name__}: {paquete.nombre} | "

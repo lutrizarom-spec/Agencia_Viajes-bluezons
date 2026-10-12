@@ -44,6 +44,7 @@ class MenuConsolaTests(unittest.TestCase):
 
         fila = self.dao.obtener_paquete(501)
         self.assertIsNotNone(fila)
+        assert fila is not None
         self.assertEqual(fila[1], "Tour Norte")
         self.assertEqual(fila[4], "nacional")
         self.assertIn("Tour Norte", salida)
@@ -59,6 +60,7 @@ class MenuConsolaTests(unittest.TestCase):
         )
 
         fila = self.dao.obtener_paquete(502)
+        assert fila is not None
         self.assertEqual(fila[0], 502)
         self.assertEqual(fila[1], "Modificado")
         self.assertEqual(fila[2], 4)
@@ -72,6 +74,7 @@ class MenuConsolaTests(unittest.TestCase):
         self.assertEqual(self.dao.obtener_paquetes(), [])
         inactivo = self.dao.obtener_paquete(503, incluir_inactivo=True)
         self.assertIsNotNone(inactivo)
+        assert inactivo is not None
         self.assertEqual(inactivo[7], 0)
 
     def test_persistencia_entre_conexiones_distintas(self) -> None:
@@ -82,6 +85,7 @@ class MenuConsolaTests(unittest.TestCase):
             dao_nuevo = PaqueteDao(otra_conexion)
             fila = dao_nuevo.obtener_paquete(504)
         self.assertIsNotNone(fila)
+        assert fila is not None
         self.assertEqual(fila[1], "Persistente")
 
     def test_entradas_invalidas_no_cierran_el_menu(self) -> None:
@@ -99,6 +103,7 @@ class MenuConsolaTests(unittest.TestCase):
 
         fila = self.dao.obtener_paquete(505)
         self.assertIsNotNone(fila)
+        assert fila is not None
         self.assertEqual(fila[1], "Valido")
         self.assertEqual(fila[2], 2)
         self.assertEqual(fila[3], 1500)
@@ -123,6 +128,7 @@ class MenuConsolaTests(unittest.TestCase):
 
         self.assertIn("ya existe", salida)
         fila = self.dao.obtener_paquete(506)
+        assert fila is not None
         self.assertEqual(fila[1], "Primero")
 
     def test_entrada_cerrada_sale_de_forma_limpia(self) -> None:
@@ -142,6 +148,8 @@ class MenuConsolaTests(unittest.TestCase):
 
         internacional = self.dao.obtener_paquete(507)
         crucero = self.dao.obtener_paquete(508)
+        assert internacional is not None
+        assert crucero is not None
         self.assertEqual(internacional[4], "internacional")
         self.assertEqual(internacional[5], 1)
         self.assertEqual(crucero[4], "crucero")
@@ -162,8 +170,8 @@ class MenuConsolaTests(unittest.TestCase):
         self.assertIn("405.000,00", salida)  # Crucero: 400 USD × 950 + 25.000 de impuesto.
         self.assertNotIn("225.000,00", salida)  # No debe reaparecer la conversión fija con 900.
 
-    def test_demostracion_omite_extranjeros_sin_tasa_y_continua(self) -> None:
-        """Sin tasa válida ni caché, la demo informa, omite extranjeros y mantiene nacionales."""
+    def test_demostracion_es_reproducible_sin_internet_ni_cache(self) -> None:
+        """Sin cotización real ni caché, la demo muestra los tres subtipos con una tasa de demostración."""
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "demo.db"
             with patch("main.mindicador_usd_clp_provider", side_effect=OSError("sin red")):
@@ -172,11 +180,25 @@ class MenuConsolaTests(unittest.TestCase):
                     main_module.demostracion_modelo(str(db_path))
 
         salida = buffer.getvalue()
-        self.assertIn("180.000,00", salida)  # El paquete nacional sigue calculándose.
-        self.assertIn("no se pudo obtener la tasa", salida)  # Informa el motivo del fallo.
-        self.assertIn("omitido", salida)  # Deja constancia de los precios extranjeros omitidos.
-        self.assertNotIn("225.000,00", salida)  # Nunca sustituye la tasa por 900 para internacional.
-        self.assertNotIn("385.000,00", salida)  # El crucero tampoco usa la conversión fija con 900.
+        self.assertIn("180.000,00", salida)  # Nacional ejecuta su propio calcular_precio().
+        self.assertIn("225.000,00", salida)  # Internacional: 250 USD × tasa de demostración, método distinto.
+        self.assertIn("385.000,00", salida)  # Crucero: 400 USD × tasa de demostración + impuesto, método distinto.
+        self.assertIn("no se pudo obtener la tasa", salida)  # Informa que no hubo cotización real.
+        self.assertIn("no es una cotización vigente", salida)  # No presenta la tasa de demo como real.
+
+    def test_demostracion_no_persiste_la_tasa_de_demostracion_en_fx_cache(self) -> None:
+        """La tasa de demostración queda separada de la cotización real y no se guarda en fx_cache."""
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "demo.db"
+            with patch("main.mindicador_usd_clp_provider", side_effect=OSError("sin red")):
+                with redirect_stdout(io.StringIO()):
+                    main_module.demostracion_modelo(str(db_path))
+
+            with closing(crear_conexion(db_path)) as conexion:
+                fila = conexion.execute(
+                    "SELECT rate FROM fx_cache WHERE base_currency = 'USD' AND target_currency = 'CLP'"
+                ).fetchone()
+        self.assertIsNone(fila)  # Sin cotización real no hay respaldo persistido.
 
     def test_main_completa_el_flujo_de_consola_con_base_temporal(self) -> None:
         """`main(db_path=...)` arranca el menú desde el punto de entrada real."""
@@ -185,10 +207,11 @@ class MenuConsolaTests(unittest.TestCase):
             side_effect=["1", "1", "509", "Via main", "3", "5000", "6"],
         ):
             with redirect_stdout(io.StringIO()):
-                main_module.main(db_path=self.db_path)
+                main_module.main(db_path=str(self.db_path))
 
         fila = self.dao.obtener_paquete(509)
         self.assertIsNotNone(fila)
+        assert fila is not None
         self.assertEqual(fila[1], "Via main")
 
 

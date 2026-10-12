@@ -2,10 +2,16 @@
 
 import math  # Proporciona valores de prueba NaN e infinito para importes.
 import unittest  # Ejecuta los casos de modelo sin base de datos ni dependencias externas.
+from typing import Any  # Anota el helper que aísla entradas deliberadamente inválidas.
 
 from model.paquete_crucero import Paquete_Crucero  # Comprueba atributos e importe específico del crucero.
 from model.paquete_internacional import Paquete_Internacional  # Comprueba el estado booleano del pasaporte.
 from model.paquete_turistico import Paquete_Turistico  # Comprueba las reglas compartidas por todos los paquetes.
+
+
+def _entrada_invalida(valor: object) -> Any:
+    """Marca un valor deliberadamente inválido para probar la validación en tiempo de ejecución."""
+    return valor
 
 
 class PackageModelInvariantTests(unittest.TestCase):
@@ -48,7 +54,7 @@ class PackageModelInvariantTests(unittest.TestCase):
         for invalid_tax in (-0.01, math.nan, math.inf, True, "100"):  # Incluye importes negativos, no finitos y tipos impropios.
             with self.subTest(tax=invalid_tax):  # Mantiene cada valor inválido identificable.
                 with self.assertRaises(ValueError):  # El constructor comunica el error de dominio.
-                    Paquete_Crucero(1, "Crucero", 3, 100.0, invalid_tax)  # No crea el crucero con un impuesto incorrecto.
+                    Paquete_Crucero(1, "Crucero", 3, 100.0, _entrada_invalida(invalid_tax))  # No crea el crucero con un impuesto incorrecto.
 
         cruise = Paquete_Crucero(1, "Crucero", 3, 100.0, 0)  # Un impuesto nulo es válido para paquetes sin recargo portuario.
         self.assertEqual(cruise.impuesto_puerto, 0)  # Conserva el valor válido sin alterar la regla del subtipo.
@@ -57,18 +63,18 @@ class PackageModelInvariantTests(unittest.TestCase):
     def test_international_model_requires_a_boolean_passport_flag(self) -> None:
         """El constructor y el setter aplican el mismo tipo estricto al pasaporte."""
         with self.assertRaises(ValueError):  # Un entero no debe confundirse con un booleano.
-            Paquete_Internacional(1, "Internacional", 4, 100.0, 1)  # Intenta crear el subtipo con tipo incorrecto.
+            Paquete_Internacional(1, "Internacional", 4, 100.0, _entrada_invalida(1))  # Intenta crear el subtipo con tipo incorrecto.
 
         package = Paquete_Internacional(1, "Internacional", 4, 100.0, True)  # Crea un paquete con pasaporte válido.
         self.assertTrue(package.pasaporte_valido)  # Comprueba que el booleano válido se conserva.
         with self.assertRaises(ValueError):  # El setter conserva su validación para actualizaciones posteriores.
-            package.pasaporte_valido = 0  # Rechaza el entero cero aunque tenga significado de falso en una condición.
+            package.pasaporte_valido = _entrada_invalida(0)  # Rechaza el entero cero aunque tenga significado de falso en una condición.
         self.assertEqual(package.calcular_precio(), 90000.0)  # Confirma que validar el pasaporte no cambia la fórmula internacional.
         self.assertEqual(package.calcular_precio(987.65), 98765.0)  # Permite calcular con la cotización congelada por la compra.
         for invalid_rate in (0, -1, math.nan, math.inf, True, "900"):  # No acepta tasas nulas, negativas, no finitas ni tipos incorrectos.
             with self.subTest(rate=invalid_rate):
                 with self.assertRaises(ValueError):
-                    package.calcular_precio(invalid_rate)
+                    package.calcular_precio(_entrada_invalida(invalid_rate))
 
     def test_cruise_uses_supplied_exchange_rate_and_keeps_port_tax(self) -> None:
         """La cotización recibida reemplaza el multiplicador fijo durante una reserva."""

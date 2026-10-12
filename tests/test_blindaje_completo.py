@@ -143,11 +143,8 @@ class _CodedOperationalError(sqlite3.OperationalError):
 
     def __init__(self, message: str, code: int | None) -> None:  # Acepta None para ejercitar el fallback por mensaje.
         super().__init__(message)  # Conserva el mensaje que el helper inspecciona como respaldo.
-        self._test_code = code  # Guarda el código que expondrá la propiedad de la subclase.
-
-    @property
-    def sqlite_errorcode(self) -> int | None:  # Sustituye el descriptor de sqlite3 para pruebas deterministas.
-        return self._test_code  # Devuelve el código configurado, incluido None.
+        if code is not None:  # Solo expone el código cuando existe; None simula su ausencia para el getattr del helper.
+            self.sqlite_errorcode = code  # Sobrescribe el descriptor de sqlite3 con el código determinado.
 
 
 class SqliteLockClassificationTests(unittest.TestCase):

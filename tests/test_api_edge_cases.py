@@ -8,6 +8,7 @@ import unittest  # Ejecuta pruebas de integración con aserciones estándar.
 from contextlib import closing  # Cierra conexiones para permitir eliminar la base en Windows.
 from datetime import UTC, date, datetime, timedelta  # Construye fecha de viaje y claims JWT de prueba.
 from pathlib import Path  # Construye rutas para la base temporal.
+from typing import Any  # Anota de forma explícita el doble que reproduce la firma real de `_purchase_once`.
 from unittest.mock import patch  # Simula bloqueo SQLite y controla pausas de retry.
 
 import jwt  # Firma un JWT de prueba cuyo vencimiento está en el pasado.
@@ -21,8 +22,10 @@ from services.compra_service import (  # Accede a la compra y a los errores tran
     PAYMENT_PENDING_TTL_SECONDS,
     CompraService,
     DatabaseBusyError,
+    IdempotentPurchaseResult,
     PaymentTransitionConflictError,
     PurchasePersistenceError,
+    ReservationReceipt,
 )
 from services.rate_limiter import (  # Verifica la traducción de bloqueos del limitador.
     RateLimiter,
@@ -744,7 +747,7 @@ class ApiEdgeCaseTests(unittest.TestCase):
         service = self.app.state.compra_service  # Usa la misma instancia de compra que la API local.
         service.configure_capacity(202, TRAVEL_DATE, 1)  # Configura exactamente el único cupo de la fecha.
 
-        def submit_same_purchase(_: int) -> object:
+        def submit_same_purchase(_: int) -> IdempotentPurchaseResult:
             """Ejecuta la misma compra y clave desde uno de los hilos."""
             return service.purchase_idempotently(  # El primero crea y el resto debe recuperar el mismo recibo.
                 "10.000.013-K", 202, 1, "concurrent-edge-idempotency-key", travel_date=TRAVEL_DATE
@@ -903,7 +906,7 @@ class ApiEdgeCaseTests(unittest.TestCase):
         actual_purchase = service._purchase_once  # Conserva la operación transaccional para invocarla después del bloqueo simulado.
         attempts = [0]  # Cuenta las ejecuciones del bloque de compra.
 
-        def locked_once(*args: object) -> tuple[object, bool]:
+        def locked_once(*args: Any) -> tuple[ReservationReceipt, bool]:
             """Simula un bloqueo SQLite una vez y luego ejecuta la transacción normal."""
             attempts[0] += 1  # Registra cada intento que alcanzó el límite de transacción.
             if attempts[0] == 1:  # Solo la primera ejecución representa un bloqueo recuperable.

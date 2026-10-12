@@ -2,6 +2,7 @@
 
 import unittest
 from datetime import date
+from typing import Any, cast
 
 from model.anticipo_insuficiente_error import AnticipoInsuficienteError
 from model.cliente import Cliente
@@ -11,6 +12,11 @@ from model.paquete_internacional import Paquete_Internacional
 from model.paquete_nacional import Paquete_Nacional
 from model.pasaporte_requerido_error import PasaporteRequeridoError
 from model.reserva import Reserva
+
+
+def _entrada_invalida(valor: object) -> Any:
+    """Marca un valor deliberadamente inválido para probar la validación en tiempo de ejecución."""
+    return valor
 
 
 class ReservationModelTests(unittest.TestCase):
@@ -46,7 +52,7 @@ class ReservationModelTests(unittest.TestCase):
         self.assertEqual(self.reservation.detalles[0].subtotal, 170000.0)
         self.assertEqual(self.reservation.total, 170000.0)
         with self.assertRaises(AttributeError):
-            self.reservation.detalles.append(self.reservation.detalles[0])
+            cast(Any, self.reservation.detalles).append(self.reservation.detalles[0])
 
     def test_reservation_composes_each_detail_internally(self) -> None:
         self.reservation.agregar_detalle(1)
@@ -63,7 +69,7 @@ class ReservationModelTests(unittest.TestCase):
         self.reservation.agregar_detalle(1)
         self.assertTrue(self.reservation.confirmar())
         with self.assertRaises(AttributeError):
-            self.reservation.estado = "cancelada"
+            cast(Any, self.reservation).estado = "cancelada"
         with self.assertRaises(ValueError):
             self.reservation.agregar_detalle(1)
         self.assertTrue(self.reservation.cancelar())
@@ -87,7 +93,7 @@ class ReservationModelTests(unittest.TestCase):
                 "RES-302",
                 date(2026, 10, 6),
                 date(2026, 12, 15),
-                "cliente",
+                _entrada_invalida("cliente"),
                 self.package,
             )
         with self.assertRaises(TypeError):
@@ -96,7 +102,7 @@ class ReservationModelTests(unittest.TestCase):
                 date(2026, 10, 6),
                 date(2026, 12, 15),
                 self.client,
-                "paquete",
+                _entrada_invalida("paquete"),
             )
 
     def test_international_reservation_requires_registered_passport(self) -> None:
@@ -150,9 +156,9 @@ class ReservationModelTests(unittest.TestCase):
 
     def test_setters_reject_invalid_client_values(self) -> None:
         with self.assertRaises(ValueError):
-            self.client.telefono_movil = 123
+            self.client.telefono_movil = _entrada_invalida(123)
         with self.assertRaises(ValueError):
-            self.client.pasaporte = None
+            self.client.pasaporte = _entrada_invalida(None)
         with self.assertRaises(ValueError):
             self.client.nombre = " "
 
