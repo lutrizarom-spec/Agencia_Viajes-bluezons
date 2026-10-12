@@ -1,0 +1,104 @@
+classDiagram
+direction TB
+
+class Persona {
+    -rut: str
+    -nombre: str
+    -telefono_movil: str
+    +validar_datos(): bool
+}
+
+class Cliente {
+    -id_cliente: int
+    -pasaporte: str
+    -correo: str
+    +validar_pasaporte(): bool
+}
+
+class Paquete_Turistico {
+    -codigo: int
+    -nombre: str
+    -duracion: int
+    -precio_base: float
+    +requiere_pasaporte: bool
+    +calcular_precio(tasa_cambio: float | None = None): float
+    +obtener_detalle(): str
+}
+
+class Paquete_Nacional {
+    +calcular_precio(tasa_cambio: float | None = None): float
+}
+
+class Paquete_Internacional {
+    -pasaporte_valido: bool
+    +requiere_pasaporte: bool
+    +calcular_precio(tasa_cambio: float | None = None): float
+}
+
+class Paquete_Crucero {
+    -impuesto_puerto: float
+    +calcular_precio(tasa_cambio: float | None = None): float
+}
+
+class Reserva {
+    -numero_reserva: str
+    -fecha_reserva: date
+    -fecha_viaje: date
+    -estado: str
+    -tasa_cambio_aplicada: float
+    -cliente: Cliente
+    -paquete: Paquete_Turistico
+    -detalles: list[Detalle_Reserva]
+    +agregar_detalle(cantidad: int): Detalle_Reserva
+    +confirmar(): bool
+    +cancelar(): bool
+    +validar_anticipo(monto_anticipo: float): bool
+    +calcular_total(): float
+}
+
+class Detalle_Reserva {
+    -id_detalle: int
+    -referencia: Paquete_Turistico | Servicio_Turistico
+    -tasa_cambio: float | None
+    -cantidad: int
+    -subtotal: float
+    +paquete: Paquete_Turistico | None
+    +servicio: Servicio_Turistico | None
+    +calcular_subtotal(): float
+}
+
+class Pago {
+    -id_pago: str
+    -fecha: date
+    -monto: float
+    -estado: str
+    -fecha_vencimiento: date
+    -reserva: Reserva
+    -boleta: Boleta
+    +procesar_pago(): None
+}
+
+class Boleta {
+    -num_boleta: int
+    -fecha: date
+    -monto: float
+    -emitida: bool
+    +emitir(): None
+}
+
+Persona <|-- Cliente
+Paquete_Turistico <|-- Paquete_Nacional
+Paquete_Turistico <|-- Paquete_Internacional
+Paquete_Turistico <|-- Paquete_Crucero
+
+Reserva --> "1" Cliente : cliente
+Reserva --> "1" Paquete_Turistico : paquete
+Reserva "1" *-- "0..*" Detalle_Reserva : compone
+Detalle_Reserva --> "0..1" Paquete_Turistico : referencia paquete
+Pago --> "1" Reserva : paga
+Pago "1" *-- "1" Boleta : compone
+
+note for Reserva "Modelo de dominio/consola: lo persiste ReservaDao y lo usa<br/>main.py. La API (CompraService) no usa Reserva,<br/>Detalle_Reserva, Pago ni Boleta; guarda en<br/>reservas/payments/package_inventory. La API si reutiliza<br/>Paquete_*, paquete_factory, money y pasaporte_registrado.<br/>Estados: pendiente, confirmada, cancelada. Puede existir sin<br/>detalles, pero confirmar() y validar_anticipo() exigen al<br/>menos uno.<br/>Anticipo: validar_anticipo() exige al menos el 50 % del total<br/>(calculo en float) y lanza AnticipoInsuficienteError; la API<br/>calcula su anticipo del 50 % en centesimos con redondeo half-<br/>up (money.half_up_minor_units).<br/>ReservaDao copia los datos de cliente y paquete en la fila de<br/>la reserva (reservas_modelo)."
+note for Detalle_Reserva "Un detalle valido referencia exactamente un paquete o un<br/>servicio, nunca ambos ni ninguno (lo exige el setter de<br/>referencia; la tabla detalle_reserva no tiene un CHECK que lo<br/>haga cumplir).<br/>Se persiste con tipo_item = paquete o servicio. Si es de<br/>paquete, agregar_detalle usa el paquete de su reserva.<br/>Vista nucleo: Servicio_Turistico y sus subtipos estan en<br/>diagrama_agencia_completo.mmd."
+note for Pago "Estados del dominio: pendiente, confirmado, fallido; la API<br/>los persiste como pending/confirmed/failed.<br/>fallido esta permitido por el modelo, pero ningun codigo del<br/>dominio lo asigna actualmente: procesar_pago() pasa a<br/>confirmado o lanza excepcion.<br/>Reserva no guarda sus pagos y el codigo no limita cuantos Pago<br/>apuntan a una Reserva. ReservaDao no persiste Pago ni Boleta.<br/>La boleta se crea junto con el pago y se emite en<br/>procesar_pago()."
+note for Paquete_Turistico "Fuente editable del PNG diagrama_clases.png (modelo nucleo).<br/>El diagrama ampliado con servicios turisticos es<br/>diagrama_agencia_completo.mmd."
