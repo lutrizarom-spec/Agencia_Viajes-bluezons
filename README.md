@@ -13,19 +13,27 @@ Agencia de Viajes Bluezons es una aplicación local de gestión de paquetes tur�
 
 ## Guía rápida para el evaluador
 
-El proyecto no incluye usuarios ni secretos por defecto (por seguridad), así que
-hay que aprovisionar una cuenta y datos de ejemplo. El script
-`scripts/seed_demo.py` crea un **cliente** (`11.111.111-1`), un **administrador**
-(`22.222.222-2`) y tres paquetes de ejemplo (nacional, internacional, crucero)
-con cupos; si no defines claves, genera unas al azar y las **imprime** para que
-puedas iniciar sesión. Es idempotente: repetirlo no duplica datos ni cambia
-claves existentes.
+El proyecto no incluye usuarios ni secretos por defecto (por seguridad). El
+script `scripts/seed_demo.py` aprovisiona los datos de ejemplo: un **cliente**,
+un **administrador** y tres paquetes (nacional, internacional, crucero) con
+cupos. Es idempotente: repetirlo no duplica datos ni cambia claves existentes.
+
+Las credenciales de demostración son:
+
+| Rol | RUT | Clave |
+|---|---|---|
+| Cliente | `11.111.111-1` | `cliente-demo-2026` |
+| Administrador | `22.222.222-2` | `admin-demo-2026` |
+
+Son claves de ejemplo, no secretos reales: el script las fija con las variables
+`AGENCIA_DEMO_CLIENT_PASSWORD` y `AGENCIA_DEMO_ADMIN_PASSWORD`. Si no las
+defines, genera claves al azar y las **imprime** para que las uses.
 
 **Con Docker**
 ```powershell
 Copy-Item .env.example .env      # edita AGENCIA_JWT_SECRET (>= 32 bytes)
 docker compose up --build -d
-docker compose exec api python -m scripts.seed_demo
+docker compose exec -e AGENCIA_DEMO_CLIENT_PASSWORD=cliente-demo-2026 -e AGENCIA_DEMO_ADMIN_PASSWORD=admin-demo-2026 api python -m scripts.seed_demo
 ```
 - Frontend: http://localhost:8080
 - API / Swagger: http://localhost:8000/docs
@@ -34,6 +42,8 @@ docker compose exec api python -m scripts.seed_demo
 ```powershell
 .\run_local.ps1                  # crea el venv, instala y levanta la API
 # en otra terminal, desde la raíz:
+$env:AGENCIA_DEMO_CLIENT_PASSWORD = "cliente-demo-2026"
+$env:AGENCIA_DEMO_ADMIN_PASSWORD = "admin-demo-2026"
 .\.venv\Scripts\python.exe -m scripts.seed_demo
 ```
 - Frontend: http://127.0.0.1:8000/app/
