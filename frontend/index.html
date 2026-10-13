@@ -1,18 +1,30 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es" data-theme="light">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
     <title>Agencia de Viajes Bluezons</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <a class="skip-link" href="#contenido">Saltar al contenido</a>
+
     <header class="site-header">
-      <h1>Agencia de Viajes Bluezons</h1>
-      <p class="subtitle">Catálogo de paquetes y valores</p>
+      <div class="site-header__brand">
+        <span class="site-header__logo" aria-hidden="true">✈</span>
+        <div>
+          <h1>Agencia de Viajes Bluezons</h1>
+          <p class="subtitle">Catálogo de paquetes y valores</p>
+        </div>
+      </div>
+      <div class="site-header__meta">
+        <span id="fx-rate" class="fx-badge muted" aria-live="polite">Tipo de cambio: consultando…</span>
+        <button id="theme-toggle" type="button" class="secondary" aria-pressed="false">Tema oscuro</button>
+      </div>
     </header>
 
-    <main class="layout">
+    <main id="contenido" class="layout">
       <section id="login-panel" class="card" aria-labelledby="login-title">
         <h2 id="login-title">Ingresar</h2>
         <form id="login-form" novalidate>
@@ -28,8 +40,8 @@
         <p class="hint">Las cuentas se aprovisionan localmente; no existe registro público.</p>
       </section>
 
-      <section id="catalog-panel" class="card" aria-labelledby="catalog-title" hidden>
-        <div class="session-row">
+      <section id="app-panel" class="stack" hidden>
+        <div class="card session-row">
           <p>
             Conectado como <strong id="session-rut"></strong>
             <span class="role-badge" id="session-role"></span>
@@ -37,35 +49,72 @@
           <button type="button" id="logout-button" class="secondary">Salir</button>
         </div>
 
-        <p id="fx-rate" class="hint"></p>
+        <section class="card" aria-labelledby="catalog-title">
+          <div class="section-head">
+            <h2 id="catalog-title">Paquetes disponibles</h2>
+            <div class="filters">
+              <label class="field field--inline">
+                <span class="field__label">Desde</span>
+                <input id="travel-date" type="date" aria-label="Fecha de viaje" />
+              </label>
+              <label class="field field--inline">
+                <span class="field__label">Tipo</span>
+                <select id="type-filter" aria-label="Filtrar por tipo">
+                  <option value="todos">Todos</option>
+                  <option value="nacional">Nacional</option>
+                  <option value="internacional">Internacional</option>
+                  <option value="crucero">Crucero</option>
+                </select>
+              </label>
+              <label class="field field--inline">
+                <span class="field__label">Ordenar</span>
+                <select id="sort-filter" aria-label="Ordenar por">
+                  <option value="codigo">Código</option>
+                  <option value="precio-asc">Precio ↑</option>
+                  <option value="precio-desc">Precio ↓</option>
+                  <option value="cupos">Cupos</option>
+                </select>
+              </label>
+              <label class="field field--inline">
+                <span class="field__label">Buscar</span>
+                <input id="search-filter" type="search" placeholder="nombre…" aria-label="Buscar por nombre" />
+              </label>
+              <button type="button" id="reload-button" class="secondary">Actualizar</button>
+            </div>
+          </div>
 
-        <h2 id="catalog-title">Paquetes disponibles</h2>
-        <div class="filters">
-          <label for="travel-date">Fecha de viaje (opcional)</label>
-          <input id="travel-date" type="date" />
-          <button type="button" id="reload-button" class="secondary">Actualizar</button>
-        </div>
+          <p id="catalog-status" class="hint" aria-live="polite"></p>
+          <p id="catalog-error" class="error" role="alert" hidden></p>
 
-        <p id="catalog-error" class="error" role="alert" hidden></p>
+          <div class="chart-wrap">
+            <h3 class="chart-title">Comparación de precios (por persona)</h3>
+            <div id="price-chart" class="chart"></div>
+          </div>
 
-        <div class="table-wrapper">
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Código</th>
-                <th scope="col">Nombre</th>
-                <th scope="col">Duración</th>
-                <th scope="col">Tipo</th>
-                <th scope="col">Precio por persona</th>
-                <th scope="col">Cupos</th>
-              </tr>
-            </thead>
-            <tbody id="catalog-body"></tbody>
-          </table>
-        </div>
+          <div id="catalog" class="catalog" aria-live="polite"></div>
+        </section>
+
+        <section id="reservations-panel" class="card" aria-labelledby="reservations-title">
+          <div class="section-head">
+            <h2 id="reservations-title">Mis reservas</h2>
+            <button type="button" id="load-reservations" class="secondary">Refrescar</button>
+          </div>
+          <p id="reservations-status" class="hint" aria-live="polite"></p>
+          <div id="reservations"></div>
+        </section>
       </section>
     </main>
 
-    <script src="app.js"></script>
+    <div id="detail-modal" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="detail-title">
+      <div class="modal__backdrop" data-close-modal></div>
+      <div class="modal__panel" role="document">
+        <button type="button" class="modal__close" data-close-modal aria-label="Cerrar">×</button>
+        <div id="detail-body"></div>
+      </div>
+    </div>
+
+    <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
+
+    <script type="module" src="js/app.js"></script>
   </body>
 </html>

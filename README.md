@@ -542,6 +542,31 @@ turísticos (hotel/estancia, vuelo, excursión, seguro) existen en el dominio y 
 consola, pero no están publicados en la API. El uso sin Docker sigue disponible
 como se describe en «API REST local».
 
+### Recorrido visual
+
+![Recorrido del frontend: login, catálogo, detalle, reservas y tema oscuro](docs/img/frontend.gif)
+
+| Login | Catálogo | Detalle del paquete | Mis reservas |
+|---|---|---|---|
+| ![Login](docs/img/01-login.png) | ![Catálogo](docs/img/02-catalogo.png) | ![Detalle](docs/img/03-detalle.png) | ![Reservas](docs/img/04-reservas.png) |
+
+Tema oscuro: ![Tema oscuro](docs/img/05-tema-oscuro.png)
+
+### Arquitectura del stack en Docker
+
+```mermaid
+flowchart LR
+    B["Navegador<br/>localhost:8080"] -->|HTTP| N["nginx<br/>estáticos + proxy"]
+    N -->|"/auth /paquetes /reservas<br/>/tipo-cambio /admin /docs"| A["FastAPI + uvicorn<br/>(usuario no-root)"]
+    A --> DB[("SQLite<br/>/data/agencia.db")]
+    A -->|USD/CLP| FX["mindicador.cl → open.er-api.com → caché"]
+```
+
+El frontend usa módulos ES (`frontend/js/`) sin build ni dependencias externas, con
+tema claro/oscuro, filtros, gráfico SVG de precios y flujo de reserva. La API corre
+como usuario no-root con healthcheck; nginx aplica cabeceras de seguridad y sirve
+todo desde un mismo origen.
+
 ## Bitácora de Avances
 
 ### 2026-10-03 — Configuración del proyecto y estructura base

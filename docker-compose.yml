@@ -8,13 +8,16 @@ services:
       - agencia_data:/data
     ports:
       - "8000:8000"
+    restart: unless-stopped
 
   frontend:
     build: ./frontend
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "8080:80"
+    restart: unless-stopped
 
 volumes:
   agencia_data:
