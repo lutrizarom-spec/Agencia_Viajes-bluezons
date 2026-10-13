@@ -70,7 +70,7 @@ from services.compra_service import (  # Importa compra transaccional y errores 
 from services.fx_service import (  # Inyecta proveedor externo y traduce falta de cotización.
     FxService,
     FxServiceError,
-    mindicador_usd_clp_provider,
+    resilient_usd_clp_provider,
 )
 from services.notification_outbox import (
     Mailer,
@@ -313,7 +313,7 @@ def create_app(
     database_path: str | Path | None = None,
     *,
     jwt_secret: str | None = None,
-    fx_provider: Callable[[], float] = mindicador_usd_clp_provider,
+    fx_provider: Callable[[], float] = resilient_usd_clp_provider,
     notification_mailer: Mailer | None = None,
 ) -> FastAPI:
     """Construye e inyecta servicios locales; se usa con Uvicorn en modo factory."""

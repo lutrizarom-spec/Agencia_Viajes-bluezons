@@ -159,7 +159,7 @@ class MenuConsolaTests(unittest.TestCase):
         """La demo convierte internacional y crucero con la tasa obtenida por FxService."""
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "demo.db"
-            with patch("main.mindicador_usd_clp_provider", return_value=950.0):
+            with patch("main.resilient_usd_clp_provider", return_value=950.0):
                 buffer = io.StringIO()
                 with redirect_stdout(buffer):
                     main_module.demostracion_modelo(str(db_path))
@@ -174,7 +174,7 @@ class MenuConsolaTests(unittest.TestCase):
         """Sin cotización real ni caché, la demo muestra los tres subtipos con una tasa de demostración."""
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "demo.db"
-            with patch("main.mindicador_usd_clp_provider", side_effect=OSError("sin red")):
+            with patch("main.resilient_usd_clp_provider", side_effect=OSError("sin red")):
                 buffer = io.StringIO()
                 with redirect_stdout(buffer):
                     main_module.demostracion_modelo(str(db_path))
@@ -190,7 +190,7 @@ class MenuConsolaTests(unittest.TestCase):
         """La tasa de demostración queda separada de la cotización real y no se guarda en fx_cache."""
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "demo.db"
-            with patch("main.mindicador_usd_clp_provider", side_effect=OSError("sin red")):
+            with patch("main.resilient_usd_clp_provider", side_effect=OSError("sin red")):
                 with redirect_stdout(io.StringIO()):
                     main_module.demostracion_modelo(str(db_path))
 

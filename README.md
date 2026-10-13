@@ -179,6 +179,13 @@ inyecta una función equivalente que realice la solicitud autenticada y retorne
 la tasa USD/CLP; los secretos deben leerse de variables de entorno o de un
 gestor de secretos, nunca quedar escritos en el código.
 
+La aplicación usa por defecto `resilient_usd_clp_provider`: intenta
+`mindicador_usd_clp_provider` (dólar observado) y, si no responde por red,
+HTTP o formato, recurre a `open_er_api_usd_clp_provider`
+(`https://open.er-api.com/v6/latest/USD`). Si ambos fallan, `FxService`
+mantiene la última tasa guardada en la caché. Para usar solo mindicador,
+inyecta `mindicador_usd_clp_provider` en `create_app(fx_provider=...)`.
+
 `services.rate_limiter.RateLimiter` guarda ventanas por identificador y ámbito
 en `rate_limit_buckets`. La API lo conecta a los intentos de login por RUT y a
 las solicitudes de reserva autenticadas. Los buckets se actualizan de forma
@@ -488,6 +495,52 @@ alertas ni recuperación ante desastre. Antes de producción, aprovisiona el
 secreto JWT y las credenciales SMTP mediante un gestor seguro, publica la API
 tras un proxy HTTPS y planifica copias externas cifradas y pruebas periódicas
 de restauración. Los pagos siguen siendo simulados; no se cobran fondos reales.
+
+## Frontend web mínimo (Docker)
+
+El directorio `frontend/` contiene una página estática (HTML, CSS y JavaScript
+sin build) con login por RUT y clave y el catálogo de paquetes con sus valores.
+`docker-compose.yml` levanta dos contenedores: la API FastAPI y un nginx que
+sirve el frontend y reenvía `/auth/login`, `/paquetes`, `/tipo-cambio` y
+`/reservas` a la API. El frontend usa rutas relativas, por lo que no requiere
+CORS ni configuración adicional, y la base SQLite queda en el volumen
+`agencia_data` (`/data/agencia.db`), por lo que persiste entre reinicios.
+
+1. Crea el archivo de entorno con un secreto JWT de al menos 32 bytes:
+
+   ```powershell
+   Copy-Item .env.example .env
+   # Edita .env y define AGENCIA_JWT_SECRET; puedes generar uno con:
+   python -c "import secrets; print(secrets.token_urlsafe(48))"
+   ```
+
+2. Construye y levanta los servicios:
+
+   ```powershell
+   docker compose up --build
+   ```
+
+3. Abre el frontend en `http://localhost:8080`; la API y su documentación quedan
+   en `http://localhost:8000` y `http://localhost:8000/docs`.
+
+4. Aprovisiona una cuenta, porque no hay registro público. Con los contenedores
+   en ejecución:
+
+   ```powershell
+   docker compose exec api python -c "import os; from pathlib import Path; from services.auth_service import AuthService, UserRole; AuthService(Path(os.environ['AGENCIA_DB_PATH']), os.environ['AGENCIA_JWT_SECRET']).create_user('11.111.111-1', 'una-clave-de-12-o-mas', UserRole.CLIENTE)"
+   ```
+
+   Usa un RUT válido (con dígito verificador) y una clave de al menos 12
+   caracteres. Repite el comando con `UserRole.ADMINISTRADOR` si necesitas una
+   cuenta administradora.
+
+5. Inicia sesión en el frontend con ese RUT y clave para ver el catálogo y el
+   tipo de cambio USD/CLP.
+
+El frontend solo muestra paquetes con su precio y cupos: los servicios
+turísticos (hotel/estancia, vuelo, excursión, seguro) existen en el dominio y la
+consola, pero no están publicados en la API. El uso sin Docker sigue disponible
+como se describe en «API REST local».
 
 ## Bitácora de Avances
 

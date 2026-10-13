@@ -21,7 +21,7 @@ from model.reserva import Reserva
 from services.fx_service import (
     FxService,
     FxServiceError,
-    mindicador_usd_clp_provider,
+    resilient_usd_clp_provider,
 )
 
 TEXTO_MENU = """
@@ -235,7 +235,7 @@ def _tasa_usd_clp(db_path: str | None) -> tuple[float, bool]:
     """
     servicio = FxService(
         resolver_ruta_base_datos(db_path),
-        mindicador_usd_clp_provider,
+        resilient_usd_clp_provider,
     )
     try:
         return servicio.get_usd_clp_rate(), True

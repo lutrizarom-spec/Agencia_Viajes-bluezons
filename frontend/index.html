@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agencia de Viajes Bluezons</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <h1>Agencia de Viajes Bluezons</h1>
+      <p class="subtitle">Catálogo de paquetes y valores</p>
+    </header>
+
+    <main class="layout">
+      <section id="login-panel" class="card" aria-labelledby="login-title">
+        <h2 id="login-title">Ingresar</h2>
+        <form id="login-form" novalidate>
+          <label for="rut">RUT</label>
+          <input id="rut" name="rut" type="text" autocomplete="username" placeholder="11.111.111-1" required />
+
+          <label for="password">Clave</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+
+          <button type="submit" id="login-button">Entrar</button>
+        </form>
+        <p id="login-error" class="error" role="alert" hidden></p>
+        <p class="hint">Las cuentas se aprovisionan localmente; no existe registro público.</p>
+      </section>
+
+      <section id="catalog-panel" class="card" aria-labelledby="catalog-title" hidden>
+        <div class="session-row">
+          <p>
+            Conectado como <strong id="session-rut"></strong>
+            <span class="role-badge" id="session-role"></span>
+          </p>
+          <button type="button" id="logout-button" class="secondary">Salir</button>
+        </div>
+
+        <p id="fx-rate" class="hint"></p>
+
+        <h2 id="catalog-title">Paquetes disponibles</h2>
+        <div class="filters">
+          <label for="travel-date">Fecha de viaje (opcional)</label>
+          <input id="travel-date" type="date" />
+          <button type="button" id="reload-button" class="secondary">Actualizar</button>
+        </div>
+
+        <p id="catalog-error" class="error" role="alert" hidden></p>
+
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Código</th>
+                <th scope="col">Nombre</th>
+                <th scope="col">Duración</th>
+                <th scope="col">Tipo</th>
+                <th scope="col">Precio por persona</th>
+                <th scope="col">Cupos</th>
+              </tr>
+            </thead>
+            <tbody id="catalog-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

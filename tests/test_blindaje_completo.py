@@ -13,6 +13,8 @@ from services.fx_service import (  # Importa las piezas del servicio FX que se v
     FxService,  # Servicio que valida y guarda tasas recibidas del proveedor.
     FxServiceError,  # Excepción de dominio al fallar tanto proveedor como caché.
     mindicador_usd_clp_provider,  # Adaptador HTTP de ejemplo para el indicador público.
+    open_er_api_usd_clp_provider,  # Proveedor de respaldo cuando el primario no responde.
+    resilient_usd_clp_provider,  # Compone primario y respaldo sin tocar la caché del servicio.
 )
 from services.rate_limiter import RateLimiter  # Importa el limitador persistente que verifican las pruebas.
 
@@ -68,6 +70,53 @@ class FxServiceTests(unittest.TestCase):
         with patch("services.fx_service.requests.get", return_value=response):  # Evita la red y entrega el cuerpo vacío.
             with self.assertRaises(ValueError):  # El adaptador debe rechazar una respuesta válida pero inutilizable.
                 mindicador_usd_clp_provider()  # Ejecuta el adaptador contra la respuesta inválida.
+
+    def test_open_er_api_provider_parses_usd_clp_value(self) -> None:
+        """El respaldo lee la tasa CLP de la tabla de open.er-api.com."""
+        response = Mock()  # Simula la respuesta sin abrir un socket.
+        response.json.return_value = {"result": "success", "rates": {"CLP": 977.03}}  # Imita la estructura de la API.
+        with patch("services.fx_service.requests.get", return_value=response) as mocked_get:  # Aísla el test de la red.
+            rate = open_er_api_usd_clp_provider()  # Ejecuta el respaldo real contra la respuesta simulada.
+
+        self.assertEqual(rate, 977.03)  # Verifica que retorne el valor observado como float.
+        mocked_get.assert_called_once_with("https://open.er-api.com/v6/latest/USD", timeout=5)  # Confirma endpoint y timeout.
+        response.raise_for_status.assert_called_once_with()  # Verifica que detecte respuestas 4xx/5xx.
+
+    def test_open_er_api_provider_rejects_unsuccessful_result(self) -> None:
+        """Un estado distinto de success debe ser un error del proveedor de respaldo."""
+        response = Mock()  # Representa una respuesta con result no exitoso.
+        response.json.return_value = {"result": "error", "rates": {}}  # Sin estado exitoso no hay tasa confiable.
+        with patch("services.fx_service.requests.get", return_value=response):  # Evita la red.
+            with self.assertRaises(ValueError):  # El respaldo debe rechazar la respuesta inutilizable.
+                open_er_api_usd_clp_provider()  # Ejecuta el respaldo contra la respuesta inválida.
+
+    def test_open_er_api_provider_requires_clp_rate(self) -> None:
+        """Si la tabla no incluye CLP, el respaldo debe fallar explícitamente."""
+        response = Mock()  # Representa una respuesta exitosa sin la moneda esperada.
+        response.json.return_value = {"result": "success", "rates": {"EUR": 1.0}}  # Falta CLP en la tabla.
+        with patch("services.fx_service.requests.get", return_value=response):  # Evita la red.
+            with self.assertRaises(ValueError):  # No debe devolver una tasa ausente.
+                open_er_api_usd_clp_provider()  # Ejecuta el respaldo contra la respuesta incompleta.
+
+    def test_resilient_provider_uses_primary_when_available(self) -> None:
+        """Con el primario disponible no se invoca el respaldo."""
+        with patch("services.fx_service.mindicador_usd_clp_provider", return_value=950.0):  # Primario simuladamente sano.
+            with patch("services.fx_service.open_er_api_usd_clp_provider") as fallback:  # Vigila que el respaldo no se llame.
+                rate = resilient_usd_clp_provider()  # Ejecuta el proveedor combinado.
+
+        self.assertEqual(rate, 950.0)  # Conserva la tasa del indicador primario.
+        fallback.assert_not_called()  # No debe recurrir al respaldo si el primario responde.
+
+    def test_resilient_provider_falls_back_when_primary_fails(self) -> None:
+        """Si el primario falla, el proveedor combinado usa el respaldo."""
+        with patch(  # Fuerza el fallo del primario sin depender de la red.
+            "services.fx_service.mindicador_usd_clp_provider",
+            side_effect=requests.exceptions.Timeout("agotado"),
+        ):
+            with patch("services.fx_service.open_er_api_usd_clp_provider", return_value=977.03):  # Respaldo controlado.
+                rate = resilient_usd_clp_provider()  # Ejecuta el proveedor combinado.
+
+        self.assertEqual(rate, 977.03)  # Devuelve la tasa del respaldo cuando el primario no responde.
 
     def test_provider_failure_uses_last_cached_rate(self) -> None:
         """Una cotización previa debe seguir disponible cuando falla el proveedor."""

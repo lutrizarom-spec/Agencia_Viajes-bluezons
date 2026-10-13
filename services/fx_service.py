@@ -36,6 +36,39 @@ def mindicador_usd_clp_provider() -> float:
     return float(latest["valor"])  # Convierte la observación al tipo numérico que FxService valida y cachea.
 
 
+def open_er_api_usd_clp_provider() -> float:
+    """Consulta open.er-api.com y retorna la tasa USD/CLP como proveedor de respaldo.
+
+    Se usa cuando el proveedor primario no responde. Cualquier fallo de red,
+    error HTTP o formato inesperado se propaga para que FxService active la
+    caché y el circuit breaker si este respaldo también falla.
+    """
+    request_url = "https://open.er-api.com/v6/latest/USD"  # Pide la tabla de tasas con USD como base.
+    response = requests.get(request_url, timeout=5)  # Mantiene el mismo timeout acotado que el proveedor primario.
+    response.raise_for_status()  # Convierte respuestas 4xx/5xx en errores gestionados por FxService.
+    payload = response.json()  # Analiza el cuerpo JSON; un formato inválido se propaga igualmente.
+
+    if not isinstance(payload, dict) or payload.get("result") != "success":  # Valida el estado explícito de la respuesta.
+        raise ValueError("open.er-api.com no devolvió una cotización utilizable.")  # Informa una respuesta válida pero inutilizable.
+    rates = payload.get("rates")  # Extrae la tabla de tasas de la raíz JSON.
+    if not isinstance(rates, dict) or "CLP" not in rates:  # Exige la moneda de destino esperada.
+        raise ValueError("open.er-api.com no incluyó la tasa USD/CLP.")  # Evita leer una tasa ausente.
+    return float(rates["CLP"])  # Convierte la tasa a numérico para que FxService la valide y cachee.
+
+
+def resilient_usd_clp_provider() -> float:
+    """Intenta el proveedor primario y recurre al respaldo si falla.
+
+    Mantiene mindicador.cl como fuente principal (dólar observado) y usa
+    open.er-api.com solo cuando el primario no responde, mejorando la
+    disponibilidad sin cambiar la caché ni el circuit breaker de FxService.
+    """
+    try:
+        return mindicador_usd_clp_provider()  # Fuente principal documentada del proyecto.
+    except Exception:  # Cualquier fallo del primario (red, HTTP o formato) activa el respaldo.
+        return open_er_api_usd_clp_provider()  # Fuente alternativa cuando el primario no responde.
+
+
 class FxServiceError(RuntimeError):
     """Indica que no fue posible obtener el tipo de cambio ni desde la caché."""
 

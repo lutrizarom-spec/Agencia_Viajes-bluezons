@@ -1,7 +1,7 @@
 # AGENTS.md — Agencia de Viajes (bluezons)
 
 ## Proyecto
-API REST local (FastAPI + SQLite), modelo POO/DAO y menú de consola. Sin cloud ni Docker. CI usa Python 3.12.
+API REST local (FastAPI + SQLite), modelo POO/DAO, menú de consola y frontend web mínimo en `frontend/` (Docker opcional vía `docker-compose.yml`). CI usa Python 3.12.
 
 ## Mapa
 - `model/`: dominio (paquetes y subtipos, Cliente, Reserva, Pago, Money).

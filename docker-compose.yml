@@ -1,0 +1,20 @@
+services:
+  api:
+    build: .
+    environment:
+      AGENCIA_JWT_SECRET: ${AGENCIA_JWT_SECRET:?Copia .env.example a .env y define un secreto de al menos 32 bytes}
+      AGENCIA_DB_PATH: /data/agencia.db
+    volumes:
+      - agencia_data:/data
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+
+volumes:
+  agencia_data:
