@@ -55,6 +55,8 @@ class Boleta:
     def emitida(self, valor: bool) -> None:
         if not isinstance(valor, bool):
             raise ValueError("El estado de emisión debe ser booleano.")
+        if getattr(self, "_Boleta__emitida", False) and not valor:
+            raise ValueError("Una boleta emitida no puede revertirse.")
         self.__emitida = valor
 
     def emitir(self) -> None:

@@ -18,6 +18,9 @@ from model.reserva import Reserva
 class Pago:
     """Valida el anticipo y crea internamente la boleta del pago."""
 
+    _ESTADOS_VALIDOS = frozenset({"pendiente", "confirmado", "fallido"})
+    _ESTADOS_TERMINALES = frozenset({"confirmado", "fallido"})
+
     def __init__(
         self,
         id_pago: str,
@@ -68,12 +71,11 @@ class Pago:
 
     @estado.setter
     def estado(self, valor: str) -> None:
-        if not isinstance(valor, str) or valor not in {
-            "pendiente",
-            "confirmado",
-            "fallido",
-        }:
+        if not isinstance(valor, str) or valor not in self._ESTADOS_VALIDOS:
             raise ValueError("El estado del pago no es válido.")
+        actual = getattr(self, "_Pago__estado", None)
+        if actual in self._ESTADOS_TERMINALES and valor != actual:
+            raise ValueError("Un pago confirmado o fallido no puede cambiar de estado.")
         self.__estado = valor
 
     @property
@@ -107,6 +109,10 @@ class Pago:
         return valor
 
     def procesar_pago(self) -> None:
+        if self.estado == "confirmado":
+            return
+        if self.estado == "fallido":
+            raise ValueError("Un pago fallido no puede procesarse.")
         self.reserva.validar_anticipo(self.monto)
         self.estado = "confirmado"
         self.boleta.emitir()
