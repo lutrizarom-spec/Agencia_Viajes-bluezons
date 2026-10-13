@@ -11,6 +11,39 @@
 
 Agencia de Viajes Bluezons es una aplicación local de gestión de paquetes turísticos. El negocio vende paquetes **nacionales, internacionales y cruceros**, exige pasaporte para los internacionales y un anticipo mínimo del 50 %, y ofrece catálogo, reservas, control de cupos y pagos simulados. Se entrega en dos frentes que comparten el mismo dominio en Python: una **consola** (`main.py`) con menú CRUD y demostración del modelo, y una **API REST local** (`main_api.py`) con autenticación JWT y persistencia SQLite. No se publican RUT ni datos personales en este documento.
 
+## Guía rápida para el evaluador
+
+El proyecto no incluye usuarios ni secretos por defecto (por seguridad), así que
+hay que aprovisionar una cuenta y datos de ejemplo. El script
+`scripts/seed_demo.py` crea un **cliente** (`11.111.111-1`), un **administrador**
+(`22.222.222-2`) y tres paquetes de ejemplo (nacional, internacional, crucero)
+con cupos; si no defines claves, genera unas al azar y las **imprime** para que
+puedas iniciar sesión. Es idempotente: repetirlo no duplica datos ni cambia
+claves existentes.
+
+**Con Docker**
+```powershell
+Copy-Item .env.example .env      # edita AGENCIA_JWT_SECRET (>= 32 bytes)
+docker compose up --build -d
+docker compose exec api python -m scripts.seed_demo
+```
+- Frontend: http://localhost:8080
+- API / Swagger: http://localhost:8000/docs
+
+**Sin Docker**
+```powershell
+.\run_local.ps1                  # crea el venv, instala y levanta la API
+# en otra terminal, desde la raíz:
+.\.venv\Scripts\python.exe -m scripts.seed_demo
+```
+- Frontend: http://127.0.0.1:8000/app/
+- API / Swagger: http://127.0.0.1:8000/docs
+
+Usa la **fecha de viaje** que imprime el script (por defecto, hoy + 60 días;
+o fíjala con `AGENCIA_DEMO_TRAVEL_DATE=YYYY-MM-DD`) al filtrar el catálogo o al
+reservar. El cliente ve el catálogo y sus reservas; el administrador gestiona
+paquetes, cupos y pagos desde `/docs`.
+
 ## Instalación y ejecución
 
 Requisitos: Python 3.12 (la versión que ejecuta el CI del repositorio) y SQLite incluido en la biblioteca estándar. Todos los comandos se ejecutan desde la **raíz del repositorio** en PowerShell, porque `main.py` importa los paquetes `conectar`, `dao`, `model` y `services`.
