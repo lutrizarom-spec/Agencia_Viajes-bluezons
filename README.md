@@ -542,6 +542,32 @@ turísticos (hotel/estancia, vuelo, excursión, seguro) existen en el dominio y 
 consola, pero no están publicados en la API. El uso sin Docker sigue disponible
 como se describe en «API REST local».
 
+### Sin Docker (un solo comando)
+
+Si el evaluador no tiene Docker, la API también sirve el frontend en el mismo
+origen; no se necesita nginx ni CORS. Basta con un comando desde la raíz:
+
+```powershell
+.\run_local.ps1
+```
+
+El script crea el entorno virtual si falta, instala `requirements.txt`, genera un
+`AGENCIA_JWT_SECRET` para la sesión y levanta la API. Luego abre:
+
+- Frontend: `http://127.0.0.1:8000/app/`
+- Documentación interactiva: `http://127.0.0.1:8000/docs`
+
+Para crear una cuenta (no hay registro público), con las variables de la sesión
+definidas en la misma terminal:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import os; from pathlib import Path; from services.auth_service import UserRole, AuthService; AuthService(Path(os.environ['AGENCIA_DB_PATH']), os.environ['AGENCIA_JWT_SECRET']).create_user('<RUT-valido>', '<clave-de-12-o-mas>', UserRole.CLIENTE)"
+```
+
+Esta vía es idéntica al modo Docker salvo que nginx no interviene: FastAPI sirve
+los estáticos de `frontend/` bajo `/app` y el frontend usa rutas relativas al
+mismo origen.
+
 ### Recorrido visual
 
 ![Recorrido del frontend: login, catálogo, detalle, reservas y tema oscuro](docs/img/frontend.gif)

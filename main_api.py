@@ -26,6 +26,7 @@ from fastapi.security import (  # Extrae el token Bearer enviado por Authorizati
     HTTPAuthorizationCredentials,
     HTTPBearer,
 )
+from fastapi.staticfiles import StaticFiles  # Sirve el frontend estático sin Docker en el mismo origen.
 from pydantic import (  # Valida cuerpos JSON y documenta esquemas OpenAPI.
     BaseModel,
     ConfigDict,
@@ -870,5 +871,9 @@ def create_app(
         except FxServiceError as error:  # Traduce la falta de tasa disponible a indisponibilidad temporal.
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)) from error  # Permite al cliente reintentar sin exponer traceback.
         return ExchangeRateResponse(base_currency="USD", target_currency="CLP", rate=rate)  # Expone la tasa con códigos explícitos de moneda.
+
+    frontend_directory = Path(__file__).resolve().parent / "frontend"  # Ubica la UI web junto al código para servirla sin Docker.
+    if frontend_directory.is_dir():  # Omite el montaje si el frontend no está presente (por ejemplo, en la imagen sin estáticos).
+        app.mount("/app", StaticFiles(directory=str(frontend_directory), html=True), name="frontend")  # Expone la UI en /app con el mismo origen, sin CORS ni proxy.
 
     return app  # Retorna la aplicación configurada para Uvicorn y las pruebas de integración.
