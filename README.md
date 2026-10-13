@@ -11,57 +11,6 @@
 
 Agencia de Viajes Bluezons es una aplicación local de gestión de paquetes turísticos. El negocio vende paquetes **nacionales, internacionales y cruceros**, exige pasaporte para los internacionales y un anticipo mínimo del 50 %, y ofrece catálogo, reservas, control de cupos y pagos simulados. Se entrega en dos frentes que comparten el mismo dominio en Python: una **consola** (`main.py`) con menú CRUD y demostración del modelo, y una **API REST local** (`main_api.py`) con autenticación JWT y persistencia SQLite. No se publican RUT ni datos personales en este documento.
 
-## Guía rápida para el evaluador
-
-El proyecto no incluye usuarios ni secretos por defecto (por seguridad). El
-script `scripts/seed_demo.py` aprovisiona los datos de ejemplo: un **cliente**,
-un **administrador** y tres paquetes (nacional, internacional, crucero) con
-cupos. Es idempotente: repetirlo no duplica datos ni cambia claves existentes.
-
-Las credenciales de demostración son:
-
-| Rol | RUT | Clave |
-|---|---|---|
-| Cliente | `11.111.111-1` | `cliente-demo-2026` |
-| Administrador | `22.222.222-2` | `admin-demo-2026` |
-
-Son claves de ejemplo, no secretos reales: el script las fija con las variables
-`AGENCIA_DEMO_CLIENT_PASSWORD` y `AGENCIA_DEMO_ADMIN_PASSWORD`. Si no las
-defines, genera claves al azar y las **imprime** para que las uses.
-
-**Con Docker**
-```powershell
-Copy-Item .env.example .env      # edita AGENCIA_JWT_SECRET (>= 32 bytes)
-docker compose up --build -d
-docker compose exec -e AGENCIA_DEMO_CLIENT_PASSWORD=cliente-demo-2026 -e AGENCIA_DEMO_ADMIN_PASSWORD=admin-demo-2026 api python -m scripts.seed_demo
-```
-- Frontend: http://localhost:8080
-- API / Swagger: http://localhost:8000/docs
-
-**Sin Docker**
-```powershell
-.\run_local.ps1                  # crea el venv, instala y levanta la API
-# en otra terminal, desde la raíz:
-$env:AGENCIA_DEMO_CLIENT_PASSWORD = "cliente-demo-2026"
-$env:AGENCIA_DEMO_ADMIN_PASSWORD = "admin-demo-2026"
-.\.venv\Scripts\python.exe -m scripts.seed_demo
-```
-- Frontend: http://127.0.0.1:8000/app/
-- API / Swagger: http://127.0.0.1:8000/docs
-
-Usa la **fecha de viaje** que imprime el script (por defecto, hoy + 60 días;
-o fíjala con `AGENCIA_DEMO_TRAVEL_DATE=YYYY-MM-DD`) al filtrar el catálogo o al
-reservar. El cliente ve el catálogo y sus reservas; el administrador gestiona
-paquetes, cupos y pagos desde `/docs`.
-
-> **Puertos (importante):** con Docker, el frontend está en `:8080` y la API en
-> `:8000`; en `:8000` **no** existe `/app`. Sin Docker, la API sirve el frontend en
-> `http://127.0.0.1:8000/app/`. Como ambas vías usan el `:8000`, **no las ejecutes
-> a la vez**: si Docker está arriba y abres `:8000/app/` verás
-> `{"detail":"Not Found"}`. Para probar la vía sin Docker con Docker encendido,
-> primero `docker compose down` (o usa otro puerto con
-> `uvicorn main_api:create_app --factory --port 8090`).
-
 ## Instalación y ejecución
 
 Requisitos: Python 3.12 (la versión que ejecuta el CI del repositorio) y SQLite incluido en la biblioteca estándar. Todos los comandos se ejecutan desde la **raíz del repositorio** en PowerShell, porque `main.py` importa los paquetes `conectar`, `dao`, `model` y `services`.
@@ -131,11 +80,67 @@ Las siguientes medidas están respaldadas por el código del repositorio:
   - `dao/reserva_dao.py:3-6` documenta que es la capa de dominio/consola y que «la API no usa este DAO».
   - La sección «Frontera entre dominio/consola y API» de este README describe esa separación.
 
-  Nota de honestidad: no se atribuye a una herramienta de IA ninguna línea de código concreta, porque el repositorio no contiene evidencia que lo demuestre. La contribución de IA que se evalúa aquí es la **revisión crítica de una afirmación documental y su corrección**.
+  Nota de honestidad: la corrección anterior es de revisión documental; además, más abajo se documentan ejemplos concretos de código asistido por IA con su decisión técnica.
 
 **Alternativa verificada: no debilitar TLS con Mindicador.** El proveedor `mindicador_usd_clp_provider` (`services/fx_service.py:16-36`) consulta `https://mindicador.cl/api/dolar` con `requests.get(..., timeout=5)`. Se mantiene la verificación de certificados por defecto (no se usa `verify=False`) y se fija un timeout explícito; ante error, `FxService` recurre a la caché SQLite. No se declara probada ninguna conexión externa: no se ejecutó una llamada de red durante esta tarea documental.
 
+**Casos concretos de código asistido por IA.**
+
+- **Adoptado — utilidad de backup SQLite (`scripts/backup_database.py`).** Commit `07ad5d5` con `Co-authored-by: Copilot`. La IA propuso usar `sqlite3.Connection.backup()` para copiar una base SQLite en caliente. Se adoptó y se **endureció**: la copia se valida con `PRAGMA integrity_check` y se escribe con `open("xb")` para no sobrescribir un archivo existente. Motivo técnico: respaldo consistente sin bloquear y sin arriesgar los datos buenos.
+- **Descartado — `verify=False` al consultar Mindicador.** Ante errores intermitentes de red con `mindicador.cl`, se evaluó `requests.get(url, verify=False)` para omitir la verificación TLS. Se **descartó** por debilitar la seguridad (habilita un ataque de intermediario) y se resolvió con `timeout` explícito, caché SQLite y un proveedor de respaldo (`resilient_usd_clp_provider`). Motivo técnico: mantener la verificación de certificados y la continuidad del sistema.
+
 Aplicación de consola de una agencia de viajes. `main.py` presenta un menú interactivo para crear, listar, modificar y dar de baja paquetes usando `PaqueteDao` y SQLite, e incluye como opción la demostración automática del modelo de clases. Las capas de API y servicios siguen disponibles por separado en `main_api.py`.
+
+## Guía rápida para el evaluador
+
+El proyecto no incluye usuarios ni secretos por defecto (por seguridad). El
+script `scripts/seed_demo.py` aprovisiona los datos de ejemplo: un **cliente**,
+un **administrador** y tres paquetes (nacional, internacional, crucero) con
+cupos. Es idempotente: repetirlo no duplica datos ni cambia claves existentes.
+
+Las credenciales de demostración son:
+
+| Rol | RUT | Clave |
+|---|---|---|
+| Cliente | `11.111.111-1` | `cliente-demo-2026` |
+| Administrador | `22.222.222-2` | `admin-demo-2026` |
+
+Son claves de ejemplo, no secretos reales: el script las fija con las variables
+`AGENCIA_DEMO_CLIENT_PASSWORD` y `AGENCIA_DEMO_ADMIN_PASSWORD`. Si no las
+defines, genera claves al azar y las **imprime** para que las uses.
+
+**Con Docker**
+```powershell
+Copy-Item .env.example .env      # edita AGENCIA_JWT_SECRET (>= 32 bytes)
+docker compose up --build -d
+docker compose exec -e AGENCIA_DEMO_CLIENT_PASSWORD=cliente-demo-2026 -e AGENCIA_DEMO_ADMIN_PASSWORD=admin-demo-2026 api python -m scripts.seed_demo
+```
+- Frontend: http://localhost:8080
+- API / Swagger: http://localhost:8000/docs
+
+**Sin Docker**
+```powershell
+.\run_local.ps1                  # crea el venv, instala y levanta la API
+# en otra terminal, desde la raíz:
+$env:AGENCIA_DEMO_CLIENT_PASSWORD = "cliente-demo-2026"
+$env:AGENCIA_DEMO_ADMIN_PASSWORD = "admin-demo-2026"
+.\.venv\Scripts\python.exe -m scripts.seed_demo
+```
+- Frontend: http://127.0.0.1:8000/app/
+- API / Swagger: http://127.0.0.1:8000/docs
+
+Usa la **fecha de viaje** que imprime el script (por defecto, hoy + 60 días;
+o fíjala con `AGENCIA_DEMO_TRAVEL_DATE=YYYY-MM-DD`) al filtrar el catálogo o al
+reservar. El cliente ve el catálogo y sus reservas; el administrador gestiona
+paquetes, cupos y pagos desde `/docs`.
+
+> **Puertos (importante):** con Docker, el frontend está en `:8080` y la API en
+> `:8000`; en `:8000` **no** existe `/app`. Sin Docker, la API sirve el frontend en
+> `http://127.0.0.1:8000/app/`. Como ambas vías usan el `:8000`, **no las ejecutes
+> a la vez**: si Docker está arriba y abres `:8000/app/` verás
+> `{"detail":"Not Found"}`. Para probar la vía sin Docker con Docker encendido,
+> primero `docker compose down` (o usa otro puerto con
+> `uvicorn main_api:create_app --factory --port 8090`).
 
 ## Arquitectura
 
