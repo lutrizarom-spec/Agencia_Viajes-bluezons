@@ -44,6 +44,14 @@ o fíjala con `AGENCIA_DEMO_TRAVEL_DATE=YYYY-MM-DD`) al filtrar el catálogo o a
 reservar. El cliente ve el catálogo y sus reservas; el administrador gestiona
 paquetes, cupos y pagos desde `/docs`.
 
+> **Puertos (importante):** con Docker, el frontend está en `:8080` y la API en
+> `:8000`; en `:8000` **no** existe `/app`. Sin Docker, la API sirve el frontend en
+> `http://127.0.0.1:8000/app/`. Como ambas vías usan el `:8000`, **no las ejecutes
+> a la vez**: si Docker está arriba y abres `:8000/app/` verás
+> `{"detail":"Not Found"}`. Para probar la vía sin Docker con Docker encendido,
+> primero `docker compose down` (o usa otro puerto con
+> `uvicorn main_api:create_app --factory --port 8090`).
+
 ## Instalación y ejecución
 
 Requisitos: Python 3.12 (la versión que ejecuta el CI del repositorio) y SQLite incluido en la biblioteca estándar. Todos los comandos se ejecutan desde la **raíz del repositorio** en PowerShell, porque `main.py` importa los paquetes `conectar`, `dao`, `model` y `services`.
@@ -589,6 +597,9 @@ El script crea el entorno virtual si falta, instala `requirements.txt`, genera u
 
 - Frontend: `http://127.0.0.1:8000/app/`
 - Documentación interactiva: `http://127.0.0.1:8000/docs`
+
+(Requiere el puerto `:8000` libre: detén Docker con `docker compose down` antes
+de usar esta vía, o levanta uvicorn en otro puerto.)
 
 Para crear una cuenta (no hay registro público), con las variables de la sesión
 definidas en la misma terminal:
