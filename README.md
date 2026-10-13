@@ -1,5 +1,89 @@
 # Agencia de Viajes - Sistema de Gestión (POO & DAO)
 
+## Integrantes y negocio
+
+- **Proyecto:** Agencia de Viajes Bluezons.
+- **Integrantes:** Seigi Gim y Luis Lizana Román.
+- **Asignatura:** Programación Orientada a Objeto Seguro.
+- **Sección:** 114-2B-F1.
+- **Fecha de entrega:** 13 de octubre de 2026.
+- **Repositorio:** https://github.com/lutrizarom-spec/Agencia_Viajes-bluezons
+
+Agencia de Viajes Bluezons es una aplicación local de gestión de paquetes turísticos. El negocio vende paquetes **nacionales, internacionales y cruceros**, exige pasaporte para los internacionales y un anticipo mínimo del 50 %, y ofrece catálogo, reservas, control de cupos y pagos simulados. Se entrega en dos frentes que comparten el mismo dominio en Python: una **consola** (`main.py`) con menú CRUD y demostración del modelo, y una **API REST local** (`main_api.py`) con autenticación JWT y persistencia SQLite. No se publican RUT ni datos personales en este documento.
+
+## Instalación y ejecución
+
+Requisitos: Python 3.12 (la versión que ejecuta el CI del repositorio) y SQLite incluido en la biblioteca estándar. Todos los comandos se ejecutan desde la **raíz del repositorio** en PowerShell, porque `main.py` importa los paquetes `conectar`, `dao`, `model` y `services`.
+
+1. **Crear y activar el entorno virtual** (recomendado para aislar dependencias):
+
+   ```powershell
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   ```
+
+2. **Instalar las dependencias de ejecución** declaradas en `requirements.txt`:
+
+   ```powershell
+   python -m pip install -r requirements.txt
+   ```
+
+   Para desarrollo también están las dependencias de `requirements-dev.txt` (`pytest`, `ruff`, `mypy`, cobertura):
+
+   ```powershell
+   python -m pip install -r requirements.txt -r requirements-dev.txt
+   ```
+
+3. **Ejecutar la consola** desde la raíz:
+
+   ```powershell
+   python main.py
+   ```
+
+   La consola prepara la tabla de paquetes si no existe y muestra el menú para crear, listar, modificar y dar de baja paquetes, además de la demostración del modelo. Guarda en `agencia.db` salvo que se defina la variable `AGENCIA_DB_PATH`.
+
+### La API tiene configuración adicional
+
+La API reutiliza el entorno virtual y `requirements.txt` anteriores, pero **no arranca solo con el paso 3**: además exige variables de entorno y un comando distinto. Antes de iniciarla, configure una clave `AGENCIA_JWT_SECRET` de al menos 32 bytes (la aplicación falla al crearse si falta) y, opcionalmente, `AGENCIA_DB_PATH`:
+
+```powershell
+$env:AGENCIA_JWT_SECRET = (& .\.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(48))")
+$env:AGENCIA_DB_PATH = "$PWD\agencia.db"
+.\.venv\Scripts\uvicorn.exe main_api:create_app --factory --reload
+```
+
+Las cuentas se aprovisionan localmente con `AuthService` (no hay registro público) y las notificaciones por correo requieren variables `AGENCIA_SMTP_*`. El detalle completo está en «API REST local» más abajo.
+
+## Seguridad y validación
+
+Las siguientes medidas están respaldadas por el código del repositorio:
+
+- **SQL parametrizado en toda la persistencia.** Las consultas usan marcadores `?` en lugar de concatenar entradas: paquetes (`dao/paquete_dao.py:32,39,66,73`), reservas del modelo (`dao/reserva_dao.py:110,151,196,405`), tasa USD/CLP (`services/fx_service.py:124`), usuarios (`services/auth_service.py:105,125`) y compras, inventario, pagos y cancelaciones (`services/compra_service.py:283,305,351,462,661`).
+- **Claves foráneas activas.** `conectar.py:27` ejecuta `PRAGMA foreign_keys = ON` al abrir la conexión, y `services/compra_service.py:1149` lo repite en su propia conexión.
+- **Validación de entradas de consola.** `main.py:56-124` valida texto no vacío, enteros con mínimo, números finitos positivos (`math.isfinite`) y confirmaciones `s/n` antes de construir o persistir.
+- **Validación de entradas de la API.** Los cuerpos se declaran como modelos Pydantic con límites y rechazo de campos extra: `LoginRequest` (`main_api.py:93`), `PackageFields` (`:126`), `ReservationRequest` (`:170`), `PaymentTransitionRequest`/`PaymentCreateRequest` (`:202,210`), `InventoryRequest` (`:229`); usan `Field(min_length/gt/ge/le)` y `ConfigDict(extra="forbid")`. El encabezado `X-Idempotency-Key` y los identificadores de ruta se acotan con `min_length`/`max_length`, y el parámetro `limit` con `Query(ge=1, le=1000)`.
+- **Validación de dominio.** `model/validaciones.py` centraliza `validar_monto`, `validar_entero_positivo` y `texto_requerido` (rechaza booleanos, no finitos y texto vacío).
+- **Autenticación.** `services/auth_service.py:45-68` valida el RUT chileno con dígito verificador y lo normaliza; `:173-179` exige contraseñas de al menos 12 caracteres y hasta 72 bytes; las contraseñas se guardan como hash **bcrypt** y nunca en claro; el secreto JWT se rechaza si tiene menos de 32 bytes (`:82`); los errores de login son genéricos para no revelar si la cuenta existe.
+- **Límite de solicitudes.** `services/rate_limiter.py` guarda el identificador como hash de `sha256` y atiende los intentos de login por RUT y la creación de reservas.
+- **Sin secretos por defecto.** No hay secreto JWT predeterminado, ni usuarios ni contraseñas incorporadas; los secretos se leen de variables de entorno.
+- **Pagos simulados.** No se integra una pasarela real; solo se ensayan los estados `pending`/`confirmed`/`failed` sin procesar dinero.
+
+## Uso de IA y evaluación crítica
+
+**Caso: corrección documental sobre `ReservaDao` y la frontera dominio/API.**
+
+- **Problema.** La documentación afirmaba que `ReservaDao` participaba en el flujo de `main.py` o de la API. La inspección del repositorio mostró que esa persistencia no pertenece a la API operativa.
+- **Propuesta o decisión.** Se separó explícitamente el mundo **dominio/consola** (clases `Reserva`, `Detalle_Reserva`, `Pago`, `Boleta` y su persistencia `ReservaDao`) del mundo de la **API operativa** (`CompraService` sobre `reservas`, `payments`, `package_inventory`). Se documentó esa frontera y se dejó una prueba guarda.
+- **Motivo técnico.** Evitar acoplar la capa de servicios y la API a un DAO POO y a tablas (`reservas_modelo`, `detalle_reserva`) que pertenecen a otro flujo; mantener una única fuente de verdad para el almacenamiento operativo y evitar que la frontera se rompa sin aviso.
+- **Evidencia disponible.**
+  - `tests/test_architecture_boundary.py` existe y comprueba que ningún archivo de `services/*.py` ni `main_api.py` contenga los tokens `ReservaDao`, `reservas_modelo` ni `detalle_reserva` (líneas 14 y 24-32). Es una guarda que falla si se reintroduce el acoplamiento.
+  - `dao/reserva_dao.py:3-6` documenta que es la capa de dominio/consola y que «la API no usa este DAO».
+  - La sección «Frontera entre dominio/consola y API» de este README describe esa separación.
+
+  Nota de honestidad: no se atribuye a una herramienta de IA ninguna línea de código concreta, porque el repositorio no contiene evidencia que lo demuestre. La contribución de IA que se evalúa aquí es la **revisión crítica de una afirmación documental y su corrección**.
+
+**Alternativa verificada: no debilitar TLS con Mindicador.** El proveedor `mindicador_usd_clp_provider` (`services/fx_service.py:16-36`) consulta `https://mindicador.cl/api/dolar` con `requests.get(..., timeout=5)`. Se mantiene la verificación de certificados por defecto (no se usa `verify=False`) y se fija un timeout explícito; ante error, `FxService` recurre a la caché SQLite. No se declara probada ninguna conexión externa: no se ejecutó una llamada de red durante esta tarea documental.
+
 Aplicación de consola de una agencia de viajes. `main.py` presenta un menú interactivo para crear, listar, modificar y dar de baja paquetes usando `PaqueteDao` y SQLite, e incluye como opción la demostración automática del modelo de clases. Las capas de API y servicios siguen disponibles por separado en `main_api.py`.
 
 ## Arquitectura
@@ -147,7 +231,7 @@ from pathlib import Path
 from services.auth_service import AuthService, UserRole
 
 auth = AuthService(Path(os.environ.get("AGENCIA_DB_PATH", "agencia.db")), os.environ["AGENCIA_JWT_SECRET"])
-auth.create_user("10.000.013-K", getpass.getpass("Contraseña: "), UserRole.ADMINISTRADOR)
+auth.create_user("<RUT-del-administrador>", getpass.getpass("Contraseña: "), UserRole.ADMINISTRADOR)
 ```
 
 Los RUT se validan con dígito verificador y se guardan normalizados. Las
