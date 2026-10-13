@@ -292,6 +292,17 @@ class ReservaPersistenciaTests(unittest.TestCase):
     def test_reserva_inexistente_retorna_none(self) -> None:
         self.assertIsNone(self.dao.obtener_reserva("NO-EXISTE"))
 
+    def test_eliminar_reserva_es_baja_logica(self) -> None:
+        self.dao.guardar_reserva(_reserva_con_servicios())
+        self.assertEqual(self.dao.eliminar_reserva("RES-701"), 1)
+        self.assertIsNone(self.dao.obtener_reserva("RES-701"))
+        inactiva = self.dao.obtener_reserva("RES-701", incluir_inactiva=True)
+        self.assertIsNotNone(inactiva)
+        assert inactiva is not None
+        self.assertEqual(inactiva.numero_reserva, "RES-701")
+        self.assertEqual(len(self.dao.obtener_servicios_de_reserva("RES-701")), 4)
+        self.assertEqual(self.dao.eliminar_reserva("RES-701"), 0)
+
     def test_servicio_individual_se_persiste_y_recupera(self) -> None:
         servicio = Hotel_Estancia(20, "Hotel Centro", "Santiago", "Centro", 45000.0, 2)
         self.dao.guardar_servicio(servicio)

@@ -73,10 +73,14 @@ class ReservaDao(Dao):
                 paquete_precio_base REAL NOT NULL,
                 paquete_tipo TEXT NOT NULL,
                 paquete_pasaporte INTEGER,
-                paquete_impuesto REAL
+                paquete_impuesto REAL,
+                activo INTEGER NOT NULL DEFAULT 1 CHECK (activo IN (0, 1))
             )
             """
         )
+        columnas = {column[1] for column in self.cursor.execute("PRAGMA table_info(reservas_modelo)").fetchall()}  # Reconoce esquemas anteriores sin la columna activo.
+        if "activo" not in columnas:
+            self.cursor.execute("ALTER TABLE reservas_modelo ADD COLUMN activo INTEGER NOT NULL DEFAULT 1 CHECK (activo IN (0, 1))")  # Migra sin borrar reservas ni historial.
         self.cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS detalle_reserva (
@@ -146,6 +150,15 @@ class ReservaDao(Dao):
             self.conexion.rollback()
             raise
 
+    def eliminar_reserva(self, numero_reserva: str) -> int:
+        """Realiza baja lógica de la reserva: conserva la cabecera y sus líneas."""
+        self.cursor.execute(
+            "UPDATE reservas_modelo SET activo = 0 WHERE numero_reserva = ? AND activo = 1",
+            (numero_reserva,),
+        )
+        self.conexion.commit()
+        return self.cursor.rowcount  # Indica si la reserva pasó de activa a inactiva.
+
     def obtener_servicio(self, id_servicio: int) -> Servicio_Turistico | None:
         """Recupera un servicio concreto reconstruyendo su subtipo."""
         row = self.cursor.execute(
@@ -191,10 +204,9 @@ class ReservaDao(Dao):
             servicios.append(self._servicio_from_row(servicio_fila))
         return servicios
 
-    def obtener_reserva(self, numero_reserva: str) -> Reserva | None:
+    def obtener_reserva(self, numero_reserva: str, *, incluir_inactiva: bool = False) -> Reserva | None:
         """Reconstruye una reserva completa con su paquete y sus servicios."""
-        row = self.cursor.execute(
-            """
+        query = """
             SELECT numero_reserva, fecha_reserva, fecha_viaje, estado,
                    tasa_cambio_aplicada,
                    cliente_id, cliente_rut, cliente_nombre, cliente_telefono,
@@ -203,9 +215,10 @@ class ReservaDao(Dao):
                    paquete_precio_base, paquete_tipo, paquete_pasaporte,
                    paquete_impuesto
             FROM reservas_modelo WHERE numero_reserva = ?
-            """,
-            (numero_reserva,),
-        ).fetchone()
+        """
+        if not incluir_inactiva:
+            query += " AND activo = 1"  # Oculta las bajas lógicas en las lecturas habituales.
+        row = self.cursor.execute(query, (numero_reserva,)).fetchone()
         if row is None:
             return None
 

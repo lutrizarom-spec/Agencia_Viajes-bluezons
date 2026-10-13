@@ -147,7 +147,7 @@ paquetes, cupos y pagos desde `/docs`.
 - **Modelo:** `Paquete_Turistico` contiene los datos comunes y los subtipos especializan su cálculo. `Cliente` hereda los datos comunes de `Persona`. `Reserva` recibe objetos `Cliente` y `Paquete_Turistico` existentes y crea sus `Detalle_Reserva`; `Pago` crea su `Boleta`. Los diagramas editables en Mermaid son `model/diagrama_paquetes.mmd` (modelo núcleo) y `diagrama_agencia_completo.mmd` (ampliado, con los servicios turísticos); ver «Diagramas UML».
 - **Consola:** `main.py` ofrece el menú CRUD de paquetes (opciones 1 a 4) y la opción de demostración del modelo, que imprime los tres precios polimórficos, prueba una validación de setter, presenta una reserva con sus detalles y controla los errores de pasaporte y anticipo.
 - **API REST local:** `main_api.py` expone catálogo público, login JWT, consulta FX y rutas protegidas de reserva e inventario.
-- **Persistencia:** `Dao` comparte la conexión y el cursor; `PaqueteDao`, `ClienteDao` y `ReservaDao` implementan el almacenamiento de paquetes, clientes y reservas (con sus líneas de detalle), siempre con consultas parametrizadas.
+- **Persistencia:** `Dao` comparte la conexión y el cursor; `PaqueteDao`, `ClienteDao` y `ReservaDao` implementan el almacenamiento de paquetes, clientes y reservas (con sus líneas de detalle) y su baja lógica, siempre con consultas parametrizadas.
 - **Base de datos:** `conectar.py` abre la base SQLite y activa `PRAGMA foreign_keys = ON` en la conexión.
 
 ### Frontera entre dominio/consola y API
